@@ -86,14 +86,16 @@ async function writeClipboard(text: string): Promise<void> {
   }
 }
 
-function copyButton(text: string): HTMLButtonElement {
+function copyButton(text: string, label = text): HTMLButtonElement {
   const button = el(
     "button",
-    "btn btn-xs btn-ghost shrink-0 font-normal text-base-content/50",
+    "btn btn-xs btn-ghost shrink-0 font-normal text-subtle",
     "复制",
   );
   button.type = "button";
-  button.title = `复制 ${text}`;
+  button.title = `复制 ${label}`;
+  // 20 多个按钮的可访问名都是「复制」，只有 title 对读屏不可靠。
+  button.setAttribute("aria-label", `复制 ${label}`);
   button.addEventListener("click", () => {
     void (async () => {
       try {
@@ -132,14 +134,16 @@ function apiBadge(api: string | undefined): HTMLElement {
 function modalityCell(modalities: string[] | undefined): HTMLElement {
   const cell = el("div", "flex flex-wrap gap-1");
   if (!Array.isArray(modalities) || modalities.length === 0) {
-    cell.append(el("span", "text-base-content/40", "-"));
+    cell.append(el("span", "text-subtle", "-"));
     return cell;
   }
   for (const modality of modalities) {
     cell.append(
       el(
         "span",
-        "badge badge-xs badge-soft badge-neutral",
+        // badge-soft + badge-neutral 在深色主题里文字色就是 --color-neutral（37% 亮度），
+        // 叠在近黑底上只有 ~1.5:1，所以中性徽章用 ghost（base-content 文字，14:1）。
+        "badge badge-xs badge-ghost",
         MODALITY_LABELS[modality] ?? modality,
       ),
     );
@@ -153,7 +157,7 @@ function reasoningCell(model: ModelEntry): HTMLElement {
   const levels = reasoning?.levels;
 
   if (!reasoning || !Array.isArray(levels) || levels.length === 0) {
-    cell.append(el("span", "text-base-content/40", "-"));
+    cell.append(el("span", "text-subtle", "-"));
     return cell;
   }
 
@@ -165,7 +169,7 @@ function reasoningCell(model: ModelEntry): HTMLElement {
       "span",
       isDefault
         ? "badge badge-xs badge-soft badge-primary font-mono font-semibold"
-        : "badge badge-xs badge-soft badge-neutral font-mono",
+        : "badge badge-xs badge-ghost font-mono",
       level,
     );
     if (isDefault) {
@@ -177,21 +181,25 @@ function reasoningCell(model: ModelEntry): HTMLElement {
 
   if (typeof reasoning.param === "string" && reasoning.param.trim() !== "") {
     cell.append(
-      el("span", "font-mono text-[10.5px] text-base-content/45", reasoning.param),
+      el("span", "font-mono text-[11px] text-muted", reasoning.param),
     );
   }
   return cell;
 }
 
-function metaRow(label: string, value: string | null | undefined): HTMLElement {
+function metaRow(
+  label: string,
+  value: string | null | undefined,
+  copyable = true,
+): HTMLElement {
   const row = el(
     "div",
     "grid grid-cols-1 gap-0.5 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-center sm:gap-2",
   );
-  row.append(el("dt", "font-mono text-[11px] text-base-content/45", label));
+  row.append(el("dt", "font-mono text-[11px] text-muted", label));
   const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
   if (typeof value !== "string" || value.trim() === "") {
-    dd.append(el("span", "text-base-content/40", "-"));
+    dd.append(el("span", "text-subtle", "-"));
   } else {
     const code = el(
       "code",
@@ -199,7 +207,10 @@ function metaRow(label: string, value: string | null | undefined): HTMLElement {
       value,
     );
     code.title = value;
-    dd.append(code, copyButton(value));
+    dd.append(code);
+    if (copyable) {
+      dd.append(copyButton(value, label));
+    }
   }
   row.append(dd);
   return row;
@@ -210,7 +221,7 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
     "div",
     "grid grid-cols-1 gap-0.5 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-center sm:gap-2",
   );
-  row.append(el("dt", "font-mono text-[11px] text-base-content/45", "api_key"));
+  row.append(el("dt", "font-mono text-[11px] text-muted", "api_key"));
   const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
   const key = provider.api_key;
   if (key?.kind === "env" && typeof key.env === "string") {
@@ -221,11 +232,11 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
       value,
     );
     code.title = value;
-    dd.append(code, copyButton(value));
+    dd.append(code, copyButton(value, "api_key"));
   } else if (key?.kind === "literal") {
-    dd.append(el("span", "badge badge-sm badge-soft badge-error", "字面量（已隐藏）"));
+    dd.append(el("span", "badge badge-sm badge-error", "字面量（已隐藏）"));
   } else {
-    dd.append(el("span", "text-base-content/40", "-"));
+    dd.append(el("span", "text-subtle", "-"));
   }
   row.append(dd);
   return row;
@@ -234,12 +245,12 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
 function emptyState(title: string, ...lines: string[]): HTMLElement {
   const box = el(
     "div",
-    "rounded-box border border-dashed border-base-300 bg-base-100 px-6 py-12 text-center",
+    "mx-auto w-full max-w-md rounded-box border border-dashed border-base-300 bg-base-100 px-6 py-12 text-center",
   );
   box.append(el("h2", "text-sm font-semibold", title));
   for (const line of lines) {
     box.append(
-      el("p", "mx-auto mt-1.5 max-w-xl break-words text-xs text-base-content/50", line),
+      el("p", "mx-auto mt-1.5 max-w-xl break-words text-xs text-muted", line),
     );
   }
   return box;
@@ -250,7 +261,7 @@ function sectionHead(title: string, action?: HTMLButtonElement): HTMLElement {
   head.append(
     el(
       "h2",
-      "text-[11px] font-semibold uppercase tracking-[0.14em] text-base-content/50",
+      "text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
       title,
     ),
   );
@@ -265,7 +276,7 @@ function renderOverview(state: ConsoleState, providers: ProviderEntry[]): HTMLEl
   section.append(
     el(
       "h2",
-      "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-base-content/50",
+      "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
       "概览",
     ),
   );
@@ -289,7 +300,7 @@ function renderOverview(state: ConsoleState, providers: ProviderEntry[]): HTMLEl
   ];
   for (const [label, value, mono] of items) {
     const item = el("div", "rounded-box border border-base-300 bg-base-100 px-3 py-2.5");
-    item.append(el("dt", "text-[11px] text-base-content/45", label));
+    item.append(el("dt", "text-[11px] text-muted", label));
     item.append(
       el("dd", `m-0 mt-0.5 truncate text-sm font-semibold ${mono ? "font-mono" : ""}`, value),
     );
@@ -311,15 +322,17 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   head.append(
     el(
       "span",
-      "text-[11px] text-base-content/45",
+      "text-[11px] text-muted",
       `${formatNumber(models.length)} 个模型`,
     ),
   );
   if (actions.editable) {
     const tools = el("div", "ml-auto flex gap-1.5");
     tools.append(
-      actionButton("编辑", "btn btn-xs", () => actions.onEditProvider(provider)),
-      actionButton("删除", "btn btn-xs btn-error btn-soft", () =>
+      actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
+        actions.onEditProvider(provider),
+      ),
+      actionButton("删除", "btn btn-xs btn-error btn-soft max-sm:btn-sm", () =>
         actions.onDeleteProvider(provider),
       ),
     );
@@ -338,9 +351,10 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
     metaRow(
       "timeout",
       typeof provider.timeout === "number" ? `${provider.timeout}s` : undefined,
+      false,
     ),
   );
-  meta.append(metaRow("api_version", provider.api_version));
+  meta.append(metaRow("api_version", provider.api_version, false));
   body.append(meta);
 
   // 模型列表收进 provider 详情，不再单独占一个页面区块。
@@ -352,13 +366,15 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   modelsHead.append(
     el(
       "h4",
-      "text-[11px] font-semibold uppercase tracking-[0.14em] text-base-content/50",
+      "text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
       `模型 (${formatNumber(models.length)})`,
     ),
   );
   if (actions.editable) {
     modelsHead.append(
-      actionButton("新增模型", "btn btn-xs", () => actions.onCreateModel(provider)),
+      actionButton("新增模型", "btn btn-xs max-sm:btn-sm", () =>
+        actions.onCreateModel(provider),
+      ),
     );
   }
   modelsPanel.append(modelsHead);
@@ -367,7 +383,7 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
     modelsPanel.append(
       el(
         "p",
-        "m-0 rounded-lg border border-dashed border-base-300 px-4 py-6 text-center text-xs text-base-content/45",
+        "m-0 rounded-lg border border-dashed border-base-300 px-4 py-6 text-center text-xs text-subtle",
         "该 provider 未配置模型。",
       ),
     );
@@ -416,21 +432,30 @@ function renderModelTable(
   const thead = el("thead");
   const headRow = el(
     "tr",
-    "border-b border-base-300 text-[11px] uppercase tracking-wide text-base-content/45",
+    "border-b border-base-300 text-[11px] uppercase tracking-wide text-muted",
   );
   const columns = ["id", "展示名", "上下文窗口", "输出上限", "输入模态", "思考档位"];
   if (actions.editable) {
     columns.push("操作");
   }
   for (const column of columns) {
-    headRow.append(el("th", "whitespace-nowrap font-semibold", column));
+    const isActions = actions.editable && column === "操作";
+    headRow.append(
+      el(
+        "th",
+        isActions
+          ? "sticky right-0 z-10 border-l border-base-300 bg-base-100 whitespace-nowrap font-semibold"
+          : "whitespace-nowrap font-semibold",
+        column,
+      ),
+    );
   }
   thead.append(headRow);
   table.append(thead);
 
   const tbody = el("tbody");
   for (const model of models) {
-    const row = el("tr", "hover:bg-base-200/60");
+    const row = el("tr", "group hover:bg-base-200/60");
     const idCell = el("td", "whitespace-nowrap");
     idCell.append(el("code", "font-mono text-xs", textOrDash(model.id)));
     row.append(idCell);
@@ -450,11 +475,17 @@ function renderModelTable(
     row.append(reasoning);
 
     if (actions.editable) {
-      const tools = el("td", "whitespace-nowrap");
+      // 操作列吸在右侧：窄视口下不必横滚整表才能改一条模型。
+      const tools = el(
+        "td",
+        "sticky right-0 z-10 border-l border-base-300 bg-base-100 group-hover:bg-base-200",
+      );
       const group = el("div", "flex gap-1");
       group.append(
-        actionButton("编辑", "btn btn-xs", () => actions.onEditModel(provider, model)),
-        actionButton("删除", "btn btn-xs btn-error btn-soft", () =>
+        actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
+          actions.onEditModel(provider, model),
+        ),
+        actionButton("删除", "btn btn-xs btn-error btn-soft max-sm:btn-sm", () =>
           actions.onDeleteModel(provider, model),
         ),
       );
@@ -481,10 +512,10 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
   );
   const bar = el(
     "div",
-    "mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6",
+    "mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 sm:px-6",
   );
 
-  const brand = el("div", "flex min-w-0 items-center gap-3");
+  const brand = el("div", "flex min-w-0 flex-1 items-center gap-3");
   brand.append(
     el(
       "div",
@@ -499,7 +530,7 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
   titles.append(
     el(
       "p",
-      "truncate text-[11.5px] text-base-content/50",
+      "truncate text-[11.5px] text-muted",
       "本地控制台 · 编辑本机配置文件 · 不存数据、不回显密钥",
     ),
   );
@@ -508,7 +539,7 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
 
   const refreshButton = el(
     "button",
-    "btn btn-sm btn-ghost ml-auto gap-1.5",
+    "btn btn-sm btn-ghost shrink-0 gap-1.5",
     "刷新",
   );
   refreshButton.type = "button";
@@ -517,6 +548,8 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
 
   header.append(bar);
 
+  // 可见性只能靠 `hidden` 工具类切换：daisyUI 的 `.alert{display:grid}` 会盖掉
+  // UA 的 `[hidden]{display:none}`，只改 `hidden` 属性错误条依然可见。
   const errorBar = el("div", "alert alert-error mx-auto mt-4 hidden max-w-7xl text-sm");
   errorBar.setAttribute("role", "alert");
   errorBar.hidden = true;
@@ -537,11 +570,13 @@ export function setRefreshing(shell: Shell, busy: boolean): void {
 export function showError(shell: Shell, message: string): void {
   shell.errorBar.textContent = message;
   shell.errorBar.hidden = false;
+  shell.errorBar.classList.remove("hidden");
 }
 
 export function clearError(shell: Shell): void {
   shell.errorBar.textContent = "";
   shell.errorBar.hidden = true;
+  shell.errorBar.classList.add("hidden");
 }
 
 export function renderLoading(shell: Shell): void {
@@ -552,7 +587,7 @@ export function renderLoading(shell: Shell): void {
     box.append(el("div", "skeleton h-16 w-full rounded-box"));
   }
   box.append(
-    el("p", "mt-1 text-center text-xs text-base-content/50", "正在加载控制台状态…"),
+    el("p", "mt-1 text-center text-xs text-muted", "正在加载控制台状态…"),
   );
   content.append(box);
 }

@@ -27,6 +27,8 @@ export interface FieldSpec {
   required?: boolean;
   readOnly?: boolean;
   options?: readonly SelectOption[];
+  /** 文本输入框的 `<datalist>` id，用于「从已有值里挑，也允许手填」。 */
+  datalist?: string;
   min?: number;
   wide?: boolean;
 }
@@ -41,14 +43,18 @@ export interface FormSpec {
 export type FormValues = Record<string, string | string[]>;
 
 export interface FormHandle {
+  /** 对话框根节点：调用方可以往里挂 `<datalist>`，随对话框一起销毁。 */
+  root: HTMLElement;
   close(): void;
 }
 
 /** 返回错误消息（`\n` 分隔）表示失败，返回 `null` 表示成功并关闭。 */
 export type FormSubmit = (values: FormValues) => Promise<string | null>;
 
-const LABEL_CLASS = "text-xs font-medium text-base-content/60";
-const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-base-content/45";
+const LABEL_CLASS = "text-xs font-medium text-muted";
+const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-subtle";
+
+let dialogSeq = 0;
 
 function fieldControl(field: FieldSpec): HTMLElement {
   const controlId = `field-${field.name}`;
@@ -58,7 +64,7 @@ function fieldControl(field: FieldSpec): HTMLElement {
     select.id = controlId;
     select.name = field.name;
     if (field.required !== true) {
-      const empty = el("option", undefined, "—");
+      const empty = el("option", undefined, "未声明");
       empty.value = "";
       select.append(empty);
     }
@@ -102,10 +108,13 @@ function fieldControl(field: FieldSpec): HTMLElement {
   }
   if (field.readOnly === true) {
     input.readOnly = true;
-    input.classList.add("bg-base-200", "text-base-content/60");
+    input.classList.add("bg-base-200", "text-muted");
   }
   if (field.min !== undefined) {
     input.min = String(field.min);
+  }
+  if (field.datalist !== undefined) {
+    input.setAttribute("list", field.datalist);
   }
   return input;
 }
@@ -132,20 +141,32 @@ function backdrop(): HTMLFormElement {
   const form = el("form", "modal-backdrop");
   form.method = "dialog";
   const close = el("button");
+  // 遮罩按钮会铺满整屏，且不能成为 Tab 停靠点；读屏名统一成中文。
   close.textContent = "close";
+  close.setAttribute("aria-label", "关闭");
+  close.tabIndex = -1;
   form.append(close);
   return form;
 }
 
 export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
   const dialog = el("dialog", "modal");
+  // 没有 aria-labelledby 时，<dialog> 的可访问名会退化成整段正文。
+  dialogSeq += 1;
+  const titleId = `modal-title-${dialogSeq}`;
+  dialog.setAttribute("aria-labelledby", titleId);
+
   const box = el("div", "modal-box w-11/12 max-w-2xl p-0");
+  // 禁用原生校验气泡：错误统一回到对话框内的 alert，避免两套提示并存。
   const form = el("form", "flex max-h-[85vh] flex-col");
+  form.noValidate = true;
 
   const header = el("header", "border-b border-base-300 px-6 py-4");
-  header.append(el("h2", "text-base font-semibold", spec.title));
+  const heading = el("h2", "text-base font-semibold", spec.title);
+  heading.id = titleId;
+  header.append(heading);
   if (spec.description !== undefined && spec.description !== "") {
-    header.append(el("p", "mt-1 text-xs text-base-content/50", spec.description));
+    header.append(el("p", "mt-1 text-xs text-muted", spec.description));
   }
 
   const grid = el(
@@ -190,7 +211,9 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
   document.body.append(dialog);
   dialog.showModal();
 
-  const first = form.querySelector<HTMLElement>("input:not([type=checkbox]), select");
+  const first = form.querySelector<HTMLElement>(
+    "input:not([type=checkbox]):not([readonly]), select:not([disabled])",
+  );
   first?.focus();
 
   let busy = false;
@@ -199,12 +222,43 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
     if (busy) {
       return;
     }
+    const values = collect(form, spec.fields);
+
+    // 客户端只拦「必填为空」，语义错误仍然交给服务端逐条回显。
+    const missing: string[] = [];
+    for (const field of spec.fields) {
+      if (field.required !== true) {
+        continue;
+      }
+      const value = values[field.name];
+      const empty = Array.isArray(value) ? value.length === 0 : value.trim() === "";
+      if (empty) {
+        missing.push(`${field.label}：必填`);
+      }
+    }
+    if (missing.length > 0) {
+      error.textContent = missing.join("\n");
+      error.hidden = false;
+      const name = spec.fields.find((field) => {
+        const value = values[field.name];
+        return (
+          field.required === true &&
+          (Array.isArray(value) ? value.length === 0 : value.trim() === "")
+        );
+      })?.name;
+      const target = name === undefined ? null : form.elements.namedItem(name);
+      if (target instanceof HTMLElement) {
+        target.focus();
+      }
+      return;
+    }
+
     busy = true;
     error.hidden = true;
     confirm.disabled = true;
     cancel.disabled = true;
 
-    void submit(collect(form, spec.fields))
+    void submit(values)
       .then((message) => {
         if (message === null) {
           dialog.close();
@@ -228,6 +282,7 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
   dialog.addEventListener("close", () => dialog.remove());
 
   return {
+    root: dialog,
     close: () => dialog.close(),
   };
 }
@@ -244,12 +299,17 @@ export interface ConfirmSpec {
 export function confirmDialog(spec: ConfirmSpec): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const dialog = el("dialog", "modal");
+    dialogSeq += 1;
+    const titleId = `modal-title-${dialogSeq}`;
+    dialog.setAttribute("aria-labelledby", titleId);
     const box = el("div", "modal-box max-w-md p-0");
 
     const body = el("div", "px-6 py-5");
-    body.append(el("h2", "text-base font-semibold", spec.title));
+    const heading = el("h2", "text-base font-semibold", spec.title);
+    heading.id = titleId;
+    body.append(heading);
     body.append(
-      el("p", "mt-2 whitespace-pre-line text-sm text-base-content/70", spec.message),
+      el("p", "mt-2 whitespace-pre-line text-sm text-muted", spec.message),
     );
 
     const actions = el("div", "modal-action m-0 border-t border-base-300 px-6 py-4");

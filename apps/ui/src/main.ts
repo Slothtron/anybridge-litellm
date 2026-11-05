@@ -15,6 +15,7 @@ import {
 import { confirmDialog, openForm, type FieldSpec, type FormValues } from "./form";
 import {
   clearError,
+  el,
   mountShell,
   renderErrorState,
   renderLoading,
@@ -119,6 +120,9 @@ if (root === null) {
   throw new Error("缺少 #app 挂载点");
 }
 
+/** 「默认思考档位」输入框的候选来源，随模型对话框一起创建/销毁。 */
+const THINKING_LEVELS_ID = "model-thinking-levels";
+
 const token = readToken();
 let requestId = 0;
 
@@ -172,6 +176,8 @@ function openProviderForm(provider: ProviderEntry | null): void {
       label: "api_key（环境变量）",
       kind: "text",
       placeholder: "os.environ/OPENAI_API_KEY",
+      // 服务端新建时要求必填；编辑时留空表示保持原值。
+      required: !editing,
       hint: keyHint,
       wide: true,
     },
@@ -286,10 +292,12 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
       label: "默认思考档位",
       kind: "text",
       value: current?.reasoning?.default ?? "",
+      datalist: THINKING_LEVELS_ID,
+      hint: "必须是 thinking_levels 里的一个值",
     },
   ];
 
-  openForm(
+  const handle = openForm(
     {
       title: editing ? `编辑模型 · ${current.id}` : `新增模型 · ${provider.name}`,
       fields,
@@ -323,6 +331,24 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
       return null;
     },
   );
+
+  // 默认思考档位从 thinking_levels 派生候选项，同时保留手填。
+  const list = el("datalist");
+  list.id = THINKING_LEVELS_ID;
+  handle.root.append(list);
+  const levelsInput = handle.root.querySelector<HTMLInputElement>(
+    'input[name="thinking_levels"]',
+  );
+  const syncLevels = (): void => {
+    list.textContent = "";
+    for (const level of splitList(levelsInput?.value) ?? []) {
+      const option = el("option");
+      option.value = level;
+      list.append(option);
+    }
+  };
+  levelsInput?.addEventListener("input", syncLevels);
+  syncLevels();
 }
 
 async function removeProvider(provider: ProviderEntry): Promise<void> {

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anybridge_litellm_core::{load_from_path, GatewayConfig, LoadOptions};
+use anybridge_litellm_core::{load_from_path, Document, GatewayConfig, LoadOptions};
 use tracing_subscriber::EnvFilter;
 
 const BIN_NAME: &str = "anybridge-litellm";
@@ -21,6 +21,9 @@ anybridge-litellm —— 上游 provider 的纯代理网关
   -V, --version      打印版本
   -h, --help         打印本帮助
 
+未显式指定 --config 且缺省文件不存在时，以空配置 + 只读模式启动
+（控制台可浏览、不可写）；显式指定的路径不存在仍然直接报错。
+
 环境变量:
   RUST_LOG           日志过滤（缺省 info）
   GATEWAY_MASTER_KEY 等 os.environ/VAR 引用的变量在配置加载时展开
@@ -28,6 +31,8 @@ anybridge-litellm —— 上游 provider 的纯代理网关
 
 struct Options {
     config: PathBuf,
+    /// 是否显式给了 `--config`。只有缺省路径不存在时才降级成只读模式。
+    config_explicit: bool,
     strict: bool,
     bind: Option<String>,
 }
@@ -41,6 +46,7 @@ enum Parsed {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
     let mut options = Options {
         config: PathBuf::from(DEFAULT_CONFIG),
+        config_explicit: false,
         strict: false,
         bind: None,
     };
@@ -56,6 +62,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> 
                     .next()
                     .ok_or_else(|| "`--config` 需要一个路径".to_string())?;
                 options.config = PathBuf::from(value);
+                options.config_explicit = true;
             }
             "--bind" => {
                 let value = args
@@ -99,21 +106,45 @@ async fn main() -> std::process::ExitCode {
 
     init_tracing();
 
-    let config = match load_from_path(
-        &options.config,
-        &LoadOptions {
-            strict: options.strict,
-        },
-    ) {
-        Ok(outcome) => {
-            for warning in &outcome.warnings {
-                tracing::warn!("{warning}");
+    // 没有显式 `--config` 且缺省文件不存在时，以「空配置 + 只读」启动：
+    // 控制台仍可浏览（providers 为空），但写接口一律 409。
+    // 显式 `--config` 指向不存在的文件仍然报错——那是打错路径，不该被静默吞掉。
+    let read_only = !options.config_explicit && !options.config.exists();
+
+    let (config, store_path) = if read_only {
+        tracing::warn!(
+            "未找到 {}，以只读模式启动（控制台不可写）",
+            options.config.display()
+        );
+        const EMPTY: &str = "\
+auth:
+  master_key: os.environ/GATEWAY_MASTER_KEY
+providers: {}
+";
+        match Document::parse(EMPTY).and_then(|document| document.validate()) {
+            Ok(outcome) => (outcome.config, None),
+            Err(errors) => {
+                eprintln!("{errors}");
+                return std::process::ExitCode::from(2);
             }
-            outcome.config
         }
-        Err(errors) => {
-            eprintln!("{errors}");
-            return std::process::ExitCode::from(2);
+    } else {
+        match load_from_path(
+            &options.config,
+            &LoadOptions {
+                strict: options.strict,
+            },
+        ) {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    tracing::warn!("{warning}");
+                }
+                (outcome.config, Some(options.config))
+            }
+            Err(errors) => {
+                eprintln!("{errors}");
+                return std::process::ExitCode::from(2);
+            }
         }
     };
 
@@ -131,7 +162,7 @@ async fn main() -> std::process::ExitCode {
     let state = anybridge_litellm_server::AppState::with_token_and_path(
         config,
         console_token,
-        Some(options.config),
+        store_path,
         options.bind,
     );
 
@@ -189,8 +220,20 @@ mod tests {
             panic!("应进入运行模式");
         };
         assert_eq!(options.config, PathBuf::from(DEFAULT_CONFIG));
+        // 缺省路径不算显式指定：文件不存在时降级为只读模式。
+        assert!(!options.config_explicit);
         assert!(!options.strict);
         assert!(options.bind.is_none());
+    }
+
+    #[test]
+    fn read_only_document_has_empty_providers() {
+        std::env::set_var("GATEWAY_MASTER_KEY", "sk-test");
+        let outcome =
+            Document::parse("auth:\n  master_key: os.environ/GATEWAY_MASTER_KEY\nproviders: {}\n")
+                .and_then(|document| document.validate())
+                .expect("空配置应可加载");
+        assert!(outcome.config.providers.is_empty());
     }
 
     #[test]
@@ -206,6 +249,7 @@ mod tests {
             panic!("应进入运行模式");
         };
         assert_eq!(options.config, PathBuf::from("custom.yaml"));
+        assert!(options.config_explicit);
         assert!(options.strict);
         assert_eq!(options.bind.as_deref(), Some("127.0.0.1:5000"));
     }

@@ -114,6 +114,32 @@
   }
 }
 
+/*
+ * 次要文字：不要再用 `text-base-content/45` 这类透明度。
+ * 浅色主题下 base-content 本身很暗，45% 叠在白底上只有 2.75:1，
+ * 深色主题 45% 也只有 3.84:1，都低于 WCAG AA 的 4.5:1。
+ * 这里改成与底色的 oklab 混合，两套主题各给一档，实测都在 4.5:1 以上。
+ */
+@layer components {
+  .text-muted {
+    color: color-mix(in oklab, var(--color-base-content) 78%, var(--color-base-100));
+  }
+
+  .text-subtle {
+    color: color-mix(in oklab, var(--color-base-content) 70%, var(--color-base-100));
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .text-muted {
+    color: color-mix(in oklab, var(--color-base-content) 72%, var(--color-base-100));
+  }
+
+  .text-subtle {
+    color: color-mix(in oklab, var(--color-base-content) 66%, var(--color-base-100));
+  }
+}
+
 /* 焦点环统一走主色，而不是 daisyUI 默认的近黑 content 色。
  * daisyUI 组件落在 utilities 层，这里不加 `@layer`，保证覆盖顺序。 */
 .input:focus,
