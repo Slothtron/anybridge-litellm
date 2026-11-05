@@ -23,7 +23,6 @@ providers:
         input: [text, image]
         reasoning: true
         thinking_levels: [none, low, medium, high]
-        default_thinking_level: high
   openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
     api: responses
     base_url: https://api.openai.com/v1

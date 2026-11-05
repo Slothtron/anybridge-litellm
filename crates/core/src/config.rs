@@ -34,7 +34,7 @@ const PROVIDER_KEYS: [&str; 7] = [
     "api_version",
     "models",
 ];
-const MODEL_KEYS: [&str; 8] = [
+const MODEL_KEYS: [&str; 7] = [
     "id",
     "name",
     "context_window",
@@ -42,7 +42,6 @@ const MODEL_KEYS: [&str; 8] = [
     "input",
     "reasoning",
     "thinking_levels",
-    "default_thinking_level",
 ];
 
 /// 设计 §4：`api` 只在 provider 级提供，`alias` 不支持；模型级出现即启动失败。
@@ -241,9 +240,6 @@ fn model_card(provider: &str, api: ApiKind, model: &ModelEntry) -> serde_json::V
         reasoning.insert("supported".into(), model.reasoning.unwrap_or(true).into());
         reasoning.insert("param".into(), api.reasoning_param().into());
         reasoning.insert("levels".into(), model.thinking_levels.clone().into());
-        if let Some(default) = &model.default_thinking_level {
-            reasoning.insert("default".into(), default.as_str().into());
-        }
         extra.insert("reasoning".into(), reasoning.into());
     }
     if !extra.is_empty() {
@@ -630,20 +626,7 @@ impl Ctx {
             (None, true) => None,
         };
 
-        let default_thinking_level = self
-            .optional_str(mapping, "default_thinking_level", base)
-            .and_then(|level| {
-                if thinking_levels.contains(&level) {
-                    Some(level)
-                } else {
-                    self.err(
-                        &format!("{base}.default_thinking_level"),
-                        format!("`{level}` 不在 thinking_levels 内"),
-                    );
-                    None
-                }
-            });
-
+        // 默认思考档位属于客户端自己的配置，网关不落盘、也不出现在 /models 里。
         Some(ModelEntry {
             id: id?,
             name,
@@ -652,7 +635,6 @@ impl Ctx {
             input,
             reasoning,
             thinking_levels,
-            default_thinking_level,
         })
     }
 
@@ -923,8 +905,6 @@ providers:
         assert_eq!(model.max_output_tokens, Some(16_384));
         assert_eq!(model.input, Some(vec![Modality::Text, Modality::Image]));
         assert_eq!(model.reasoning, Some(true));
-        assert_eq!(model.default_thinking_level.as_deref(), Some("high"));
-
         assert_eq!(
             config.providers.get("local").unwrap().base_url,
             "http://127.0.0.1:11434/v1"
@@ -1000,17 +980,13 @@ providers:
         let reasoning = extra["reasoning"].as_object().unwrap();
         let mut reasoning_keys: Vec<&str> = reasoning.keys().map(String::as_str).collect();
         reasoning_keys.sort_unstable();
-        assert_eq!(
-            reasoning_keys,
-            vec!["default", "levels", "param", "supported"]
-        );
+        assert_eq!(reasoning_keys, vec!["levels", "param", "supported"]);
         assert_eq!(reasoning["supported"], true);
         assert_eq!(reasoning["param"], "reasoning_effort");
         assert_eq!(
             reasoning["levels"],
             serde_json::json!(["none", "low", "medium", "high"])
         );
-        assert_eq!(reasoning["default"], "high");
 
         // 未配 input / reasoning 的模型不出现 extra
         let local_card = &config.model_cards("local").unwrap()[0];
@@ -1214,29 +1190,6 @@ providers:
             vec!["providers.p.models[0].max_output_tokens"]
         );
         assert!(errors[0].message.contains("context_window"));
-    }
-
-    #[test]
-    fn default_thinking_level_must_be_known() {
-        let errors = errors_of(
-            r#"
-auth:
-  master_key: k
-providers:
-  p:
-    api: completions
-    base_url: https://example.com/v1
-    api_key: credential/k
-    models:
-      - id: m
-        thinking_levels: [low, high]
-        default_thinking_level: medium
-"#,
-        );
-        assert_eq!(
-            paths(&errors),
-            vec!["providers.p.models[0].default_thinking_level"]
-        );
     }
 
     #[test]

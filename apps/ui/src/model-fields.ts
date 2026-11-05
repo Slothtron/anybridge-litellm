@@ -1,18 +1,16 @@
 /**
- * 模型配置字段的唯一来源：8 个标准字段（id / 展示名 / 上下文窗口 / 最大输出 /
- * 输入模态 / 推理 / 思考档位 / 默认档位）的 FieldSpec、值↔草稿转换。
+ * 模型配置字段的唯一来源：7 个标准字段（id / 展示名 / 上下文窗口 / 最大输出 /
+ * 输入模态 / 推理开关 / 思考档位）的 FieldSpec、值↔草稿转换。
  *
  * 两个消费方：
  * - `main.ts` 的「新增/编辑模型」对话框（含 id 字段，提交走模型接口）
  * - `provider-dialog.ts` 目录行的手风琴（不含 id，只改本地草稿）
+ *
+ * 默认思考档位属于客户端自己的配置，网关不提供该字段。
  */
 
 import type { ModelDraft, ModelEntry, ReasoningInfo } from "./api";
-import { el } from "./render";
 import type { FieldSpec, FormValues } from "./form";
-
-/** 「默认思考档位」输入框的候选来源 id；每个表单实例自带一个 datalist。 */
-export const THINKING_LEVELS_ID = "model-thinking-levels";
 
 /** 模型配置的统一输入：状态接口的 `ModelEntry` 与提交用的 `ModelDraft` 都能装下。 */
 export interface ModelConfigValues {
@@ -28,7 +26,6 @@ export interface ModelConfigValues {
   reasoning?: boolean | ReasoningInfo;
   /** 草稿形状。 */
   thinking_levels?: string[];
-  default_thinking_level?: string;
 }
 
 export function text(value: string | string[] | undefined): string {
@@ -49,31 +46,16 @@ export function optionalNumber(value: string | string[] | undefined): number | u
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** 逗号/空白分隔的列表；空列表等价于「未声明」。 */
-export function splitList(value: string | string[] | undefined): string[] | undefined {
-  const raw = text(value);
-  if (raw === "") {
-    return undefined;
-  }
-  const items = raw
-    .split(/[,，\s]+/)
-    .map((item) => item.trim())
-    .filter((item) => item !== "");
-  return items.length === 0 ? undefined : items;
-}
-
 /** 生成模型配置的 FieldSpec；`withId` 时附带可编辑的模型 id（完整表单用）。 */
 export function modelFieldSpecs(
   current: ModelConfigValues,
-  options: { withId?: boolean; datalistId?: string } = {},
+  options: { withId?: boolean } = {},
 ): FieldSpec[] {
-  const { withId = false, datalistId = THINKING_LEVELS_ID } = options;
+  const { withId = false } = options;
   const modalities = current.input ?? current.input_modalities;
   const reasoning = current.reasoning;
   const supported = typeof reasoning === "object" ? reasoning?.supported : reasoning;
   const levels = typeof reasoning === "object" ? reasoning?.levels : current.thinking_levels;
-  const defaultLevel =
-    typeof reasoning === "object" ? reasoning?.default : current.default_thinking_level;
 
   const fields: FieldSpec[] = [];
   if (withId) {
@@ -130,15 +112,6 @@ export function modelFieldSpecs(
       wide: true,
       dependsOn: "reasoning",
     },
-    {
-      name: "default_thinking_level",
-      label: "默认思考档位",
-      kind: "text",
-      value: defaultLevel ?? "",
-      datalist: datalistId,
-      dependsOn: "reasoning",
-      hint: "必须是思考档位里的一个值",
-    },
   );
   return fields;
 }
@@ -156,7 +129,6 @@ export function draftFromValues(values: FormValues): Omit<ModelDraft, "id"> {
     input: Array.isArray(input) && input.length > 0 ? input : undefined,
     reasoning,
     thinking_levels: levels.length > 0 ? levels : undefined,
-    default_thinking_level: reasoning ? optionalText(values.default_thinking_level) : undefined,
   };
 }
 
@@ -172,7 +144,6 @@ export function modelEntryToDraft(model: ModelEntry): ModelDraft {
     // 服务端加载时已把「有档位即支持」展开成 true，这里容忍缺省。
     reasoning: reasoning === undefined ? undefined : (reasoning.supported ?? true),
     thinking_levels: reasoning?.levels,
-    default_thinking_level: reasoning?.default,
   };
 }
 
@@ -184,37 +155,6 @@ export function hasModelConfig(draft: ModelDraft): boolean {
     draft.max_output_tokens !== undefined ||
     (draft.input !== undefined && draft.input.length > 0) ||
     draft.reasoning !== undefined ||
-    (draft.thinking_levels !== undefined && draft.thinking_levels.length > 0) ||
-    draft.default_thinking_level !== undefined
+    (draft.thinking_levels !== undefined && draft.thinking_levels.length > 0)
   );
-}
-
-/**
- * 在 `root` 里挂「默认思考档位」的 datalist，并随档位行输入实时派生候选。
- * 与 `modelFieldSpecs` 的 `datalistId` 必须一致。
- */
-export function attachThinkingLevelsDatalist(
-  root: HTMLElement,
-  datalistId: string = THINKING_LEVELS_ID,
-): void {
-  const list = el("datalist");
-  list.id = datalistId;
-  root.append(list);
-  const sync = (): void => {
-    list.textContent = "";
-    for (const input of root.querySelectorAll<HTMLInputElement>(
-      'input[name="thinking_levels"]',
-    )) {
-      const value = input.value.trim();
-      if (value === "") {
-        continue;
-      }
-      const option = el("option");
-      option.value = value;
-      list.append(option);
-    }
-  };
-  // 档位行是动态增删的，用事件委托覆盖新增行。
-  root.addEventListener("input", sync);
-  sync();
 }

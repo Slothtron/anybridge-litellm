@@ -270,7 +270,6 @@ providers:
         input: [text, image]
         reasoning: true
         thinking_levels: [none, low, medium, high]
-        default_thinking_level: high
   openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
     api: responses
     base_url: https://api.openai.com/v1
@@ -303,7 +302,7 @@ providers:
   - `anthropic` → `{base}/messages`
   - `responses` → `{base}/responses`
 - provider 级字段：`api`、`name`（可选展示名，空则回退 id）、`base_url`、`api_key`、`timeout`、`api_version`（仅 `completions`/`responses`，Azure 用）。
-- 模型级字段：`id`（必填，**即上游模型 id，也是客户端传的 `model`**）、`name`（可选展示名）、`context_window`（可选）、`max_output_tokens`（可选）、`input`、`reasoning`、`thinking_levels`、`default_thinking_level`（均可选）。`name`/容量/能力只用于 `/models`，不参与转发；`api` 与 `alias` 出现在模型级即启动失败（`unknown_field`）。
+- 模型级字段：`id`（必填，**即上游模型 id，也是客户端传的 `model`**）、`name`（可选展示名）、`context_window`（可选）、`max_output_tokens`（可选）、`input`、`reasoning`、`thinking_levels`（均可选；默认档位属于客户端配置，网关不提供）。`name`/容量/能力只用于 `/models`，不参与转发；`api` 与 `alias` 出现在模型级即启动失败（`unknown_field`）。
 - **没有模型别名**：`model` 必须与配置里的 `id` 完全一致，不做大小写归一、不做前缀/后缀推断、不做模糊匹配；不一致就是 `model_not_found`。
 - **同一 provider 内 `id` 唯一**；跨 provider 允许同名（路径已限定 provider）。
 - provider 名不得用保留字 `v1`、`llmproxy`。
@@ -337,7 +336,7 @@ providers:
 | `ApiKind` | `Completions` \| `Anthropic` \| `Responses` |
 | `Modality` | `Text` \| `Image` |
 | `ProviderConfig` | `name, api, base_url, api_key: CredentialRef, api_version, timeout, models[]` |
-| `ModelEntry` | `id, name, context_window, max_output_tokens, input: Option<Vec<Modality>>, reasoning: Option<bool>, thinking_levels: Vec<String>, default_thinking_level`（`api` 只在 provider 级；无 `alias`） |
+| `ModelEntry` | `id, name, context_window, max_output_tokens, input: Option<Vec<Modality>>, reasoning: Option<bool>, thinking_levels: Vec<String>`（`api` 只在 provider 级；无 `alias`；默认档位属于客户端配置） |
 | `ModelRoute` | `provider, api, model_id, base_url, api_key: &CredentialRef, api_version, timeout` + `ModelEntry` 的展示/能力字段 |
 | `PassthroughRequest` | `provider, tail, model_id, body: Bytes`（原始字节，原样转发） |
 | `UpstreamResponse` | `status, headers, body: Stream<Bytes>`（JSON 与 SSE 同一条通道） |
@@ -392,7 +391,7 @@ providers:
 
 | 层 | 字段 | 说明 |
 |---|---|---|
-| 配置 `providers.<p>.models[]` | `id, name, context_window, max_output_tokens, input, reasoning, thinking_levels, default_thinking_level` | 人写，启动即校验 |
+| 配置 `providers.<p>.models[]` | `id, name, context_window, max_output_tokens, input, reasoning, thinking_levels` | 人写，启动即校验 |
 | 内部 `ModelRoute` | 上述全部 + `provider, api, base_url, api_key_ref, api_version, timeout` | 启动时从 provider 继承并展开 |
 | `/models` 输出 | `id, object, created, owned_by` + 可选 `name, context_window, max_output_tokens` + 可选 `extra` 对象 | 客户端可见；扩展能力统一收在 `extra` |
 
@@ -407,7 +406,7 @@ providers:
 | 上下文窗口 | `context_window` | `CatalogModel.contextWindow` / `PiModel.contextWindow` | `contextWindow?` | ✅ |
 | 输出上限 | `max_output_tokens` | `CatalogModel.maxTokens` / `PiModel.maxTokens` | `maxTokens?` | ✅ |
 | 输入模态 | `input` | `CatalogModel.supportsImages` / `PiModel.input` | `inputModalities?`（列表不解析） | ✅ 配置 → `extra.input_modalities` |
-| 思考能力 | `reasoning` / `thinking_levels` / `default_thinking_level` | `CatalogModel.reasoning` / `thinkingLevelMap` | —（DSH 从配置读） | ✅ 配置 → `extra.reasoning`；不重映射档位 |
+| 思考能力 | `reasoning` / `thinking_levels` | `CatalogModel.reasoning` / `thinkingLevelMap` | —（DSH 从配置读；默认档位是客户端自己的配置） | ✅ 配置 → `extra.reasoning`；不重映射档位 |
 | 成本 | — | `PiModel.cost` | — | ⏸ 无 USD 价格，不计算 |
 | 协议兼容 | — | `PiModel.compat` | — | ⏸ 由 `api` 类型固定 |
 
@@ -421,7 +420,6 @@ providers:
 - `input`：可选数组，取值 `text` / `image`；去重；含 `image` 时必须同时含 `text`。
 - `reasoning`：可选布尔；`thinking_levels` 非空时缺省为 true；`reasoning: false` 与 `thinking_levels` 非空同时出现即启动失败。
 - `thinking_levels`：可选字符串数组，去重、非空；值即上游 `reasoning_effort` 的可传值，`none` 表示可关闭思考。
-- `default_thinking_level`：可选；必须在 `thinking_levels` 内。
 - 容量/能力未声明时**不补默认值**，`/models` 不返回对应字段。
 
 与 wpsai 的默认值差异（有意为之）：

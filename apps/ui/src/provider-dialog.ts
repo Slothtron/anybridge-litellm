@@ -32,8 +32,6 @@ import {
 } from "./api";
 import { collectValues, modalBackdrop, renderFieldGroups } from "./form";
 import {
-  THINKING_LEVELS_ID,
-  attachThinkingLevelsDatalist,
   draftFromValues,
   hasModelConfig,
   modelEntryToDraft,
@@ -306,14 +304,12 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       return;
     }
     closeAccordion();
-    const datalistId = `${THINKING_LEVELS_ID}-${index}`;
-    const fields = modelFieldSpecs(drafts[index], { datalistId });
+    const fields = modelFieldSpecs(drafts[index]);
     const panelNode = el(
       "div",
       "mt-2 grid grid-cols-1 gap-x-4 gap-y-3 border-t border-base-300 pt-3 sm:grid-cols-2",
     );
     renderFieldGroups(panelNode, fields);
-    attachThinkingLevelsDatalist(panelNode, datalistId);
     // 输入即合回草稿：即使不收起直接保存，值也不会丢。
     const liveSync = (): void => {
       if (openIndex === index && openPanel === panelNode) {
@@ -449,7 +445,6 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       // 上游给了档位即支持推理（服务端归一化已保证 reasoning 与档位一致）。
       reasoning: model.reasoning ?? (model.thinking_levels?.length ? true : undefined),
       thinking_levels: model.thinking_levels,
-      default_thinking_level: model.default_thinking_level,
     };
   }
 
@@ -463,7 +458,6 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       "input",
       "reasoning",
       "thinking_levels",
-      "default_thinking_level",
     ] as const) {
       if (incoming[key] !== undefined) {
         Object.assign(merged, { [key]: incoming[key] });

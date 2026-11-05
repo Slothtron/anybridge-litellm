@@ -136,7 +136,6 @@ providers:
         input: [text, image]
         reasoning: true
         thinking_levels: [none, low, medium, high]
-        default_thinking_level: high
       - id: echo
       - id: raw
       - id: status429
@@ -360,7 +359,11 @@ async fn models_top_level_keys_are_exactly_whitelisted() {
     assert_eq!(full["max_output_tokens"], 16384);
     assert_eq!(full["extra"]["input_modalities"], json!(["text", "image"]));
     assert_eq!(full["extra"]["reasoning"]["param"], "reasoning_effort");
-    assert_eq!(full["extra"]["reasoning"]["default"], "high");
+    assert!(
+        full["extra"]["reasoning"].get("default").is_none(),
+        "默认思考档位属于客户端配置，网关不透出：{:?}",
+        full["extra"]["reasoning"]
+    );
 
     // 只有 id 的模型：恰好四字段，没有 extra。
     let minimal = &data[1];

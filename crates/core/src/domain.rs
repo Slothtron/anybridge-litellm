@@ -81,7 +81,6 @@ pub struct ModelEntry {
     /// `thinking_levels` 非空且未显式配置时，加载阶段已展开为 `Some(true)`。
     pub reasoning: Option<bool>,
     pub thinking_levels: Vec<String>,
-    pub default_thinking_level: Option<String>,
 }
 
 /// 单个 provider 的解析后配置。

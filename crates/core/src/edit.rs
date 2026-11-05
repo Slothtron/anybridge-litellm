@@ -42,7 +42,6 @@ pub struct ModelDraft {
     pub input: Option<Vec<String>>,
     pub reasoning: Option<bool>,
     pub thinking_levels: Option<Vec<String>>,
-    pub default_thinking_level: Option<String>,
 }
 
 /// 一份可编辑的 YAML 文档。只保证根是映射，不做字段级校验。
@@ -199,12 +198,6 @@ impl Document {
                 mapping.remove("reasoning");
             }
         }
-        set_optional_str(
-            &mut mapping,
-            "default_thinking_level",
-            draft.default_thinking_level.as_deref(),
-        );
-
         models.push(Value::Mapping(mapping));
         self.replace_models(provider, models);
         Ok(())
@@ -537,7 +530,6 @@ providers:
         draft.max_output_tokens = Some(16_384);
         draft.input = Some(vec!["text".into(), "image".into()]);
         draft.thinking_levels = Some(vec!["low".into(), "high".into()]);
-        draft.default_thinking_level = Some("high".into());
         doc.upsert_model("openai", None, &draft).unwrap();
         let outcome = doc.validate().unwrap();
         let models = &outcome.config.providers["openai"].models;
@@ -546,7 +538,6 @@ providers:
         assert_eq!(added.id, "gpt-4o-mini");
         assert_eq!(added.context_window, Some(128_000));
         assert_eq!(added.reasoning, Some(true));
-        assert_eq!(added.default_thinking_level.as_deref(), Some("high"));
     }
 
     #[test]

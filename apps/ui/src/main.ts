@@ -10,12 +10,7 @@ import {
   type ProviderEntry,
 } from "./api";
 import { confirmDialog, openForm, type FormValues } from "./form";
-import {
-  attachThinkingLevelsDatalist,
-  draftFromValues,
-  modelFieldSpecs,
-  text,
-} from "./model-fields";
+import { draftFromValues, modelFieldSpecs, text } from "./model-fields";
 import { openProviderDialog } from "./provider-dialog";
 import {
   clearError,
@@ -96,7 +91,7 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
   const current = model;
   const editing = current !== null;
 
-  const handle = openForm(
+  openForm(
     {
       title: editing ? `编辑模型 · ${current.id}` : `新增模型 · ${provider.name}`,
       fields: modelFieldSpecs(current ?? {}, { withId: true }),
@@ -119,9 +114,6 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
       return null;
     },
   );
-
-  // 默认思考档位从 thinking_levels 派生候选项，同时保留手填。
-  attachThinkingLevelsDatalist(handle.root);
 }
 
 async function removeProvider(provider: ProviderEntry): Promise<void> {

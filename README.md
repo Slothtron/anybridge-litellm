@@ -75,7 +75,6 @@ providers:
         input: [text, image]
         reasoning: true
         thinking_levels: [none, low, medium, high]
-        default_thinking_level: high
 
   openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
     api: responses
@@ -144,7 +143,6 @@ providers:
 | `input` | 否 | 输入模态数组，取值 `text` / `image` |
 | `reasoning` | 否 | 是否支持思考；`thinking_levels` 非空时缺省为 `true` |
 | `thinking_levels` | 否 | 思考档位字符串数组，值即上游可传的档位值 |
-| `default_thinking_level` | 否 | 默认思考档位，必须在 `thinking_levels` 内 |
 
 模型级不参与转发的字段（`name` / 容量 / 能力）只影响 `/models` 输出；请求体里的 `model` 必须与 `id` 完全一致，**无大小写归一、无前后缀推断、无模糊匹配**。
 
@@ -157,7 +155,6 @@ providers:
 - `input`：可选数组，去重；含 `image` 时必须同时含 `text`。
 - `reasoning`：可选布尔；`reasoning: false` 与 `thinking_levels` 非空同时出现即启动失败。
 - `thinking_levels`：可选字符串数组，去重、非空。
-- `default_thinking_level`：可选，必须在 `thinking_levels` 内。
 - 容量 / 能力未声明时**不补默认值**，`/models` 不返回对应字段。
 
 ### provider 命名

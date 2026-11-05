@@ -147,7 +147,6 @@ fn model_payload(id: &str) -> String {
         "max_output_tokens": 4096,
         "input": ["text"],
         "thinking_levels": ["low", "high"],
-        "default_thinking_level": "high",
     })
     .to_string()
 }
@@ -306,7 +305,10 @@ async fn model_crud_round_trip() {
     let added = models.iter().find(|m| m["id"] == "gpt-4o-mini").unwrap();
     assert_eq!(added["context_window"], 32768);
     assert_eq!(added["reasoning"]["param"], "reasoning_effort");
-    assert_eq!(added["reasoning"]["default"], "high");
+    assert!(
+        added["reasoning"].get("default").is_none(),
+        "默认思考档位属于客户端配置，网关不透出：{added:?}"
+    );
     assert_eq!(added["input_modalities"], json!(["text"]));
 
     // 改 id（改名）

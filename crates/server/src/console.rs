@@ -628,14 +628,7 @@ fn normalize_upstream_model(id: &str, item: &Value) -> Value {
         model.insert("reasoning".into(), false.into());
     }
 
-    if let Some(default) = ["default_thinking_level", "defaultThinkingLevel"]
-        .iter()
-        .find_map(|key| item.get(key).and_then(Value::as_str))
-        .filter(|level| !level.trim().is_empty())
-    {
-        model.insert("default_thinking_level".into(), default.into());
-    }
-
+    // 默认思考档位属于客户端自己的配置，网关不落盘也不透出。
     Value::Object(model)
 }
 
@@ -1100,8 +1093,6 @@ struct ModelPayload {
     reasoning: Option<bool>,
     #[serde(default)]
     thinking_levels: Option<Vec<String>>,
-    #[serde(default)]
-    default_thinking_level: Option<String>,
 }
 
 impl ModelPayload {
@@ -1114,7 +1105,6 @@ impl ModelPayload {
             input: self.input,
             reasoning: self.reasoning,
             thinking_levels: self.thinking_levels,
-            default_thinking_level: self.default_thinking_level,
         }
     }
 }
