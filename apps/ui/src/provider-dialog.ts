@@ -398,6 +398,25 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
     };
   }
 
+  /** 用上游字段刷新已有草稿：上游给了值就覆盖，没给就保留原配置。 */
+  function mergeUpstreamDraft(existing: ModelDraft, incoming: ModelDraft): ModelDraft {
+    const merged: ModelDraft = { ...existing };
+    for (const key of [
+      "name",
+      "context_window",
+      "max_output_tokens",
+      "input",
+      "reasoning",
+      "thinking_levels",
+      "default_thinking_level",
+    ] as const) {
+      if (incoming[key] !== undefined) {
+        Object.assign(merged, { [key]: incoming[key] });
+      }
+    }
+    return merged;
+  }
+
   function openImportPicker(
     models: readonly UpstreamModel[],
     onConfirm: (selected: UpstreamModel[]) => void,
@@ -429,8 +448,8 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       checkbox.type = "checkbox";
       checkbox.name = "import-model";
       checkbox.value = model.id;
-      // 默认勾选目录里还没有的：既不全量覆盖，也不让用户重复点。
-      checkbox.checked = !drafts.some((draft) => draft.id === model.id);
+      // 默认全选：确认即导入新条目并按上游刷新已有条目的标准字段。
+      checkbox.checked = true;
       const id = el("code", "min-w-0 truncate font-mono text-xs", model.id);
       row.append(checkbox, id);
       if (typeof model.name === "string" && model.name !== "") {
@@ -531,8 +550,17 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
         }
         openImportPicker(result.models, (selected) => {
           for (const model of selected) {
-            addDraft(upstreamToDraft(model));
+            const incoming = upstreamToDraft(model);
+            const index = drafts.findIndex((draft) => draft.id === incoming.id);
+            if (index === -1) {
+              drafts = [...drafts, incoming];
+            } else {
+              // 已存在的条目用上游字段刷新（上游给了什么就覆盖什么），
+              // 这样「获取可用模型」也能给早期导入的 id-only 条目补上标准字段。
+              drafts[index] = mergeUpstreamDraft(drafts[index], incoming);
+            }
           }
+          renderModels();
         });
       } finally {
         fetchButton.disabled = false;
