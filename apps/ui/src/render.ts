@@ -209,7 +209,7 @@ function reasoningCell(model: ModelEntry): HTMLElement {
 
   if (typeof reasoning.param === "string" && reasoning.param.trim() !== "") {
     cell.append(
-      el("span", "font-mono text-[11px] text-muted", reasoning.param),
+      el("span", "font-mono text-xs text-muted", reasoning.param),
     );
   }
   return cell;
@@ -225,7 +225,7 @@ function metaRow(
     "div",
     "grid grid-cols-1 gap-0.5 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-center sm:gap-2",
   );
-  row.append(el("dt", "font-mono text-[11px] text-muted", label));
+  row.append(el("dt", "font-mono text-xs text-muted", label));
   const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
   if (typeof value !== "string" || value.trim() === "") {
     dd.append(el("span", "text-subtle", "-"));
@@ -252,7 +252,7 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
     "div",
     "grid grid-cols-1 gap-0.5 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-center sm:gap-2",
   );
-  row.append(el("dt", "font-mono text-[11px] text-muted", "api_key"));
+  row.append(el("dt", "font-mono text-xs text-muted", "api_key"));
   const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
   const key = provider.api_key;
   const reference = typeof key?.reference === "string" ? key.reference : "";
@@ -277,7 +277,7 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
   );
   if (typeof key?.source === "string" && key.source.trim() !== "") {
     dd.append(
-      el("span", "whitespace-nowrap text-[11px] text-subtle", `源：${key.source}`),
+      el("span", "whitespace-nowrap text-xs text-subtle", `源：${key.source}`),
     );
   }
   row.append(dd);
@@ -303,7 +303,7 @@ function sectionHead(title: string, action?: HTMLButtonElement): HTMLElement {
   head.append(
     el(
       "h2",
-      "text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
+      "text-xs font-semibold uppercase tracking-[0.14em] text-muted",
       title,
     ),
   );
@@ -380,13 +380,13 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   head.append(el("h3", "text-sm font-semibold", displayName));
   // 有展示名时把 id 放到旁边（路径与配置都以 id 为准）。
   if (displayName !== provider.name) {
-    head.append(el("code", "font-mono text-[11px] text-muted", textOrDash(provider.name)));
+    head.append(el("code", "font-mono text-xs text-muted", textOrDash(provider.name)));
   }
   head.append(apiBadge(provider.api));
   head.append(
     el(
       "span",
-      "text-[11px] text-muted",
+      "text-xs text-muted",
       `${formatNumber(models.length)} 个模型`,
     ),
   );
@@ -396,7 +396,7 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
       actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
         actions.onEditProvider(provider),
       ),
-      actionButton("删除", "btn btn-xs btn-error btn-soft max-sm:btn-sm", () =>
+      actionButton("删除", "btn btn-xs btn-ghost text-error max-sm:btn-sm", () =>
         actions.onDeleteProvider(provider),
       ),
     );
@@ -430,7 +430,7 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   modelsHead.append(
     el(
       "h4",
-      "text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
+      "text-xs font-semibold uppercase tracking-[0.14em] text-muted",
       `模型 (${formatNumber(models.length)})`,
     ),
   );
@@ -496,7 +496,7 @@ function renderModelTable(
   const thead = el("thead");
   const headRow = el(
     "tr",
-    "border-b border-base-300 text-[11px] uppercase tracking-wide text-muted",
+    "border-b border-base-300 text-xs uppercase tracking-wide text-muted",
   );
   const columns = ["id", "展示名", "上下文窗口", "输出上限", "输入模态", "思考档位"];
   if (actions.editable) {
@@ -549,7 +549,7 @@ function renderModelTable(
         actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
           actions.onEditModel(provider, model),
         ),
-        actionButton("删除", "btn btn-xs btn-error btn-soft max-sm:btn-sm", () =>
+        actionButton("删除", "btn btn-xs btn-ghost text-error max-sm:btn-sm", () =>
           actions.onDeleteModel(provider, model),
         ),
       );
@@ -592,12 +592,12 @@ export function mountShell(
     ),
   );
   const titles = el("div", "min-w-0");
-  const title = el("h1", "truncate text-base font-semibold tracking-tight", "");
+  const title = el("h1", "truncate text-2xl font-semibold tracking-tight", "");
   titles.append(title);
   titles.append(
     el(
       "p",
-      "truncate text-[11.5px] text-muted",
+      "truncate text-xs text-muted",
       "本地控制台 · 编辑本机配置文件 · 不存数据、不回显密钥",
     ),
   );

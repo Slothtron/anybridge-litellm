@@ -113,7 +113,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
   const header = el("header", "border-b border-base-300 px-6 py-4");
   const heading = el(
     "h2",
-    "text-base font-semibold",
+    "text-lg font-semibold",
     current !== null ? `编辑 provider · ${current.name}` : "新增 provider",
   );
   heading.id = titleId;
@@ -157,7 +157,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
     card.type = "button";
     card.append(
       el("span", "text-sm font-medium", preset.label),
-      el("span", "font-mono text-[11px] text-subtle", `${preset.hint} · ${preset.base_url}`),
+      el("span", "font-mono text-xs text-subtle", `${preset.hint} · ${preset.base_url}`),
     );
     card.addEventListener("click", () => {
       idInput.value = preset.id;
@@ -213,7 +213,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
   secretInput.placeholder = "输入 API 密钥";
   secretInput.autocomplete = "off";
 
-  const credentialHint = el("p", "m-0 text-[11px] leading-relaxed text-subtle", "");
+  const credentialHint = el("p", "m-0 text-xs leading-relaxed text-subtle", "");
 
   customPanel.append(
     field("Provider ID", idInput, "以小写字母开头的标识，在请求中唯一标识该提供商，并用于派生凭据名。"),
@@ -237,7 +237,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
   const catalogList = el("div", "flex flex-col gap-1");
   const catalogEmpty = el(
     "p",
-    "m-0 rounded-lg border border-dashed border-base-300 px-3 py-4 text-center text-[11px] text-subtle",
+    "m-0 rounded-lg border border-dashed border-base-300 px-3 py-4 text-center text-xs text-subtle",
     "模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。",
   );
 
@@ -281,7 +281,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
     }
     wrap.append(text, control);
     if (hint !== undefined) {
-      wrap.append(el("p", "m-0 text-[11px] leading-relaxed text-subtle", hint));
+      wrap.append(el("p", "m-0 text-xs leading-relaxed text-subtle", hint));
     }
     return wrap;
   }

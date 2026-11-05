@@ -52,7 +52,7 @@ export interface FormHandle {
 export type FormSubmit = (values: FormValues) => Promise<string | null>;
 
 const LABEL_CLASS = "text-xs font-medium text-muted";
-const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-subtle";
+const HINT_CLASS = "m-0 text-xs leading-relaxed text-subtle";
 
 let dialogSeq = 0;
 
@@ -162,7 +162,7 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
   form.noValidate = true;
 
   const header = el("header", "border-b border-base-300 px-6 py-4");
-  const heading = el("h2", "text-base font-semibold", spec.title);
+  const heading = el("h2", "text-lg font-semibold", spec.title);
   heading.id = titleId;
   header.append(heading);
   if (spec.description !== undefined && spec.description !== "") {
@@ -305,7 +305,7 @@ export function confirmDialog(spec: ConfirmSpec): Promise<boolean> {
     const box = el("div", "modal-box max-w-md p-0");
 
     const body = el("div", "px-6 py-5");
-    const heading = el("h2", "text-base font-semibold", spec.title);
+    const heading = el("h2", "text-lg font-semibold", spec.title);
     heading.id = titleId;
     body.append(heading);
     body.append(
