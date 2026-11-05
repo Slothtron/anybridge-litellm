@@ -516,6 +516,77 @@ impl UpstreamFailure {
 }
 
 /// 带上凭据请求 `{base_url}/models`，把响应归一化成 `[{id, name}]`。
+/// 上游模型条目 → 控制台标准字段。别名映射覆盖常见网关/聚合器：
+///
+/// - `context_window` ← `context_window` | `context_length` | `max_input_tokens`
+/// - `max_output_tokens` ← `max_output_tokens` | `max_completion_tokens`
+/// - `input_modalities` ← `input_modalities` | `architecture.input_modalities` | `input`（只留 text/image）
+/// - `reasoning` ← `reasoning` | `supports_reasoning` | `capabilities.reasoning`
+///
+/// 取不到的字段直接省略，不做推断。
+fn normalize_upstream_model(id: &str, item: &Value) -> Value {
+    let mut model = serde_json::Map::new();
+    model.insert("id".into(), id.into());
+    if let Some(name) = item
+        .get("name")
+        .or_else(|| item.get("display_name"))
+        .and_then(Value::as_str)
+    {
+        model.insert("name".into(), name.into());
+    }
+
+    let context_window = ["context_window", "context_length", "max_input_tokens"]
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_u64));
+    if let Some(value) = context_window {
+        model.insert("context_window".into(), value.into());
+    }
+
+    let max_output_tokens = ["max_output_tokens", "max_completion_tokens"]
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_u64));
+    if let Some(value) = max_output_tokens {
+        model.insert("max_output_tokens".into(), value.into());
+    }
+
+    let mut modalities: Vec<&str> = Vec::new();
+    for kind in ["input_modalities", "input"]
+        .iter()
+        .filter_map(|key| item.get(key).and_then(Value::as_array))
+        .flatten()
+        .chain(
+            item.get("architecture")
+                .and_then(|arch| arch.get("input_modalities"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(Value::as_str)
+        .filter(|kind| *kind == "text" || *kind == "image")
+    {
+        if !modalities.contains(&kind) {
+            modalities.push(kind);
+        }
+    }
+    if !modalities.is_empty() {
+        model.insert("input_modalities".into(), modalities.into());
+    }
+
+    let reasoning = ["reasoning", "supports_reasoning"]
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_bool))
+        .or_else(|| {
+            item.get("capabilities")
+                .and_then(|caps| caps.get("reasoning"))
+                .and_then(Value::as_bool)
+        });
+    if let Some(supported) = reasoning {
+        model.insert("reasoning".into(), supported.into());
+    }
+
+    Value::Object(model)
+}
+
 async fn fetch_upstream_models(
     state: &AppState,
     base_url: &str,
@@ -582,11 +653,7 @@ async fn fetch_upstream_models(
                 .iter()
                 .filter_map(|item| {
                     let id = item.get("id").and_then(Value::as_str)?;
-                    let name = item
-                        .get("name")
-                        .or_else(|| item.get("display_name"))
-                        .and_then(Value::as_str);
-                    Some(json!({ "id": id, "name": name }))
+                    Some(normalize_upstream_model(id, item))
                 })
                 .collect()
         })

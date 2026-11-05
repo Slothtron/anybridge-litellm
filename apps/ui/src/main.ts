@@ -9,53 +9,27 @@ import {
   type MutationResult,
   type ProviderEntry,
 } from "./api";
-import { confirmDialog, openForm, type FieldSpec, type FormValues } from "./form";
+import { confirmDialog, openForm, type FormValues } from "./form";
+import {
+  attachThinkingLevelsDatalist,
+  draftFromValues,
+  modelFieldSpecs,
+  text,
+} from "./model-fields";
 import { openProviderDialog } from "./provider-dialog";
 import {
   clearError,
-  el,
   mountShell,
   renderAbout,
   renderErrorState,
   renderLoading,
+  renderProviderDetail,
   renderState,
   setActiveView,
   setRefreshing,
   showError,
   type RowActions,
-  type View,
 } from "./render";
-
-function text(value: string | string[] | undefined): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function optionalText(value: string | string[] | undefined): string | undefined {
-  const trimmed = text(value);
-  return trimmed === "" ? undefined : trimmed;
-}
-
-function optionalNumber(value: string | string[] | undefined): number | undefined {
-  const raw = text(value);
-  if (raw === "") {
-    return undefined;
-  }
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/** 逗号/空白分隔的列表；空列表等价于「未声明」。 */
-function splitList(value: string | string[] | undefined): string[] | undefined {
-  const raw = text(value);
-  if (raw === "") {
-    return undefined;
-  }
-  const items = raw
-    .split(/[,，\s]+/)
-    .map((item) => item.trim())
-    .filter((item) => item !== "");
-  return items.length === 0 ? undefined : items;
-}
 
 /** `null` = 成功；否则是可以直接展示的错误文本。 */
 function failureMessage(result: MutationResult): string | null {
@@ -79,8 +53,21 @@ if (root === null) {
 
 let requestId = 0;
 
-/** 当前视图：Provider 列表 / 关于。切换不刷新页面，只重渲染。 */
-let view: View = "providers";
+/**
+ * hash 路由：`#/` provider 列表、`#/provider/{id}` 详情、`#/about` 关于。
+ * 刷新 / 前进后退都能落回原视图；未知 id 回落列表。
+ */
+type Route = { view: "providers" | "about" } | { view: "provider"; name: string };
+
+function parseRoute(): Route {
+  const match = /^#\/provider\/([^/?]+)$/.exec(location.hash);
+  if (match !== null) {
+    return { view: "provider", name: decodeURIComponent(match[1]) };
+  }
+  return { view: location.hash === "#/about" ? "about" : "providers" };
+}
+
+let route: Route = parseRoute();
 
 const shell = mountShell(
   root,
@@ -88,108 +75,35 @@ const shell = mountShell(
     void load();
   },
   (next) => {
-    if (next === view) {
+    // 导航按钮只改 hash，真正的重渲染统一由 hashchange 驱动。
+    const target = next === "about" ? "#/about" : "#/";
+    if (location.hash === target) {
+      void load();
       return;
     }
-    view = next;
-    setActiveView(shell, view);
-    void load();
+    location.hash = target;
   },
 );
-setActiveView(shell, view);
+setActiveView(shell, route.view === "about" ? "about" : "providers");
 
-/** 「默认思考档位」输入框的候选来源，随模型对话框一起创建/销毁。 */
-const THINKING_LEVELS_ID = "model-thinking-levels";
+window.addEventListener("hashchange", () => {
+  route = parseRoute();
+  setActiveView(shell, route.view === "about" ? "about" : "providers");
+  void load();
+});
 
 function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void {
   const current = model;
   const editing = current !== null;
-  const levels = current?.reasoning?.levels?.join(", ") ?? "";
-  const supported = current?.reasoning?.supported;
-
-  const fields: FieldSpec[] = [
-    {
-      name: "id",
-      label: "模型 id",
-      kind: "text",
-      value: current?.id ?? "",
-      required: true,
-      wide: true,
-      hint: "即请求体里的 model，必须与上游完全一致",
-    },
-    { name: "name", label: "展示名（可选）", kind: "text", value: current?.name ?? "" },
-    {
-      name: "context_window",
-      label: "context_window",
-      kind: "number",
-      value: current?.context_window ?? "",
-      min: 1,
-    },
-    {
-      name: "max_output_tokens",
-      label: "max_output_tokens",
-      kind: "number",
-      value: current?.max_output_tokens ?? "",
-      min: 1,
-      hint: "不能大于 context_window",
-    },
-    {
-      name: "input",
-      label: "输入模态",
-      kind: "checkboxes",
-      value: current?.input_modalities ?? [],
-      options: [
-        { value: "text", label: "文本" },
-        { value: "image", label: "图片" },
-      ],
-    },
-    {
-      name: "reasoning",
-      label: "reasoning",
-      kind: "select",
-      value: supported === true ? "true" : supported === false ? "false" : "",
-      options: [
-        { value: "true", label: "支持" },
-        { value: "false", label: "不支持" },
-      ],
-    },
-    {
-      name: "thinking_levels",
-      label: "thinking_levels（逗号分隔）",
-      kind: "text",
-      value: levels,
-      placeholder: "none, low, medium, high",
-      wide: true,
-    },
-    {
-      name: "default_thinking_level",
-      label: "默认思考档位",
-      kind: "text",
-      value: current?.reasoning?.default ?? "",
-      datalist: THINKING_LEVELS_ID,
-      hint: "必须是 thinking_levels 里的一个值",
-    },
-  ];
 
   const handle = openForm(
     {
       title: editing ? `编辑模型 · ${current.id}` : `新增模型 · ${provider.name}`,
-      fields,
+      fields: modelFieldSpecs(current ?? {}, { withId: true }),
       submitLabel: editing ? "保存" : "创建",
     },
     async (values: FormValues) => {
-      const reasoning = text(values.reasoning);
-      const input = values.input;
-      const payload: ModelDraft = {
-        id: text(values.id),
-        name: optionalText(values.name),
-        context_window: optionalNumber(values.context_window),
-        max_output_tokens: optionalNumber(values.max_output_tokens),
-        input: Array.isArray(input) && input.length > 0 ? input : undefined,
-        reasoning: reasoning === "" ? undefined : reasoning === "true",
-        thinking_levels: splitList(values.thinking_levels),
-        default_thinking_level: optionalText(values.default_thinking_level),
-      };
+      const payload: ModelDraft = { id: text(values.id), ...draftFromValues(values) };
       const result =
         current !== null
           ? await mutate("PATCH", modelPath(provider.name), {
@@ -207,22 +121,7 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
   );
 
   // 默认思考档位从 thinking_levels 派生候选项，同时保留手填。
-  const list = el("datalist");
-  list.id = THINKING_LEVELS_ID;
-  handle.root.append(list);
-  const levelsInput = handle.root.querySelector<HTMLInputElement>(
-    'input[name="thinking_levels"]',
-  );
-  const syncLevels = (): void => {
-    list.textContent = "";
-    for (const level of splitList(levelsInput?.value) ?? []) {
-      const option = el("option");
-      option.value = level;
-      list.append(option);
-    }
-  };
-  levelsInput?.addEventListener("input", syncLevels);
-  syncLevels();
+  attachThinkingLevelsDatalist(handle.root);
 }
 
 async function removeProvider(provider: ProviderEntry): Promise<void> {
@@ -297,24 +196,37 @@ async function load(): Promise<void> {
 
   setRefreshing(shell, false);
 
-  if (result.kind === "ok") {
-    actions.editable = result.state.editable !== false;
-    if (view === "about") {
-      renderAbout(shell, result.state);
-    } else {
-      renderState(shell, result.state, actions);
+  if (result.kind !== "ok") {
+    if (result.kind === "unauthorized") {
+      renderErrorState(shell, "未授权", "当前 token 无法读取控制台状态。");
+      showError(shell, "token 无效或已失效");
+      return;
     }
+    renderErrorState(shell, "加载失败", result.message);
+    showError(shell, result.message);
     return;
   }
 
-  if (result.kind === "unauthorized") {
-    renderErrorState(shell, "未授权", "当前 token 无法读取控制台状态。");
-    showError(shell, "token 无效或已失效");
+  actions.editable = result.state.editable !== false;
+  // 删除 / 重命名可能让 hash 里的 provider 失效，每次渲染前重新解析。
+  route = parseRoute();
+  if (route.view === "about") {
+    renderAbout(shell, result.state);
     return;
   }
-
-  renderErrorState(shell, "加载失败", result.message);
-  showError(shell, result.message);
+  if (route.view === "provider") {
+    const name = route.name;
+    const provider = (result.state.providers ?? []).find(
+      (item) => item.name === name,
+    );
+    if (provider !== undefined) {
+      renderProviderDetail(shell, result.state, provider, actions);
+      return;
+    }
+    // provider 已不存在：回落列表，且不产生新的历史记录。
+    history.replaceState(null, "", "#/");
+  }
+  renderState(shell, result.state, actions);
 }
 
 void load();

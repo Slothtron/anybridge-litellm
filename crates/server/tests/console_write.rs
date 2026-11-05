@@ -980,13 +980,22 @@ async fn provider_display_name_falls_back_to_id() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 假上游：`GET /v1/models` 返回两条模型。
+/// 假上游：`GET /v1/models` 返回条目覆盖标准字段与各种别名写法。
 async fn upstream_models_handler() -> axum::Json<Value> {
     axum::Json(json!({
         "object": "list",
         "data": [
+            // 裸条目：只有 id，不映射任何标准字段。
             {"id": "gpt-4o", "object": "model"},
-            {"id": "gpt-4o-mini", "object": "model", "name": "GPT-4o mini"},
+            // 常见别名：OpenRouter 风格 context_length / max_completion_tokens / architecture 嵌套。
+            {"id": "gpt-4o-mini", "name": "GPT-4o mini", "context_length": 128000,
+             "max_completion_tokens": 16384, "supports_reasoning": true,
+             "architecture": {"input_modalities": ["text", "image", "audio"]}},
+            // 直写风格：context_window / max_output_tokens / input / reasoning，混入非法模态与去重。
+            {"id": "o4-reasoning", "context_window": 200000, "max_output_tokens": 100000,
+             "input": ["text", "text", "image"], "reasoning": false},
+            // 数字字段是字符串或缺失 → 不猜，整段省略。
+            {"id": "legacy", "context_window": "128k", "max_completion_tokens": null},
         ],
     }))
 }
@@ -1044,7 +1053,37 @@ async fn upstream_models_can_be_imported_selectively() {
         .iter()
         .map(|model| model["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec!["gpt-4o", "gpt-4o-mini"]);
+    assert_eq!(ids, vec!["gpt-4o", "gpt-4o-mini", "o4-reasoning", "legacy"]);
+
+    // 标准字段映射：别名归一、非法值省略，取不到就不出现键。
+    let models = body["models"].as_array().unwrap();
+    let mini = models.iter().find(|m| m["id"] == "gpt-4o-mini").unwrap();
+    assert_eq!(
+        mini["context_window"], 128000,
+        "context_length 别名：{mini:?}"
+    );
+    assert_eq!(mini["max_output_tokens"], 16384);
+    assert_eq!(mini["reasoning"], true);
+    assert_eq!(
+        mini["input_modalities"],
+        json!(["text", "image"]),
+        "audio 被过滤，未知模态不进目录：{mini:?}"
+    );
+    let o4 = models.iter().find(|m| m["id"] == "o4-reasoning").unwrap();
+    assert_eq!(o4["reasoning"], false);
+    assert_eq!(
+        o4["input_modalities"],
+        json!(["text", "image"]),
+        "去重：{o4:?}"
+    );
+    let bare = models.iter().find(|m| m["id"] == "gpt-4o").unwrap();
+    assert!(bare.get("name").is_none(), "无 name 不给 null：{bare:?}");
+    assert!(bare.get("context_window").is_none());
+    let legacy = models.iter().find(|m| m["id"] == "legacy").unwrap();
+    assert!(
+        legacy.get("context_window").is_none() && legacy.get("max_output_tokens").is_none(),
+        "字符串/null 数字不猜：{legacy:?}"
+    );
 
     // 4. 只导入其中一条。
     let response = console(

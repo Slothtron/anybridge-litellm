@@ -119,21 +119,56 @@ function fieldControl(field: FieldSpec): HTMLElement {
   return input;
 }
 
-function collect(form: HTMLFormElement, fields: readonly FieldSpec[]): FormValues {
+/**
+ * 从任意容器收集字段值（不要求是 `<form>`）：手风琴等非 openForm 场景复用。
+ * checkboxes 取所有勾选项，其余控件按 `name` 取第一个。
+ */
+export function collectValues(
+  root: ParentNode,
+  fields: readonly FieldSpec[],
+): FormValues {
   const values: FormValues = {};
   for (const field of fields) {
     if (field.kind === "checkboxes") {
       values[field.name] = Array.from(
-        form.querySelectorAll<HTMLInputElement>(`input[name="${field.name}"]:checked`),
+        root.querySelectorAll<HTMLInputElement>(`input[name="${field.name}"]:checked`),
       ).map((input) => input.value);
       continue;
     }
-    const control = form.elements.namedItem(field.name);
-    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+    const control = root.querySelector<HTMLInputElement | HTMLSelectElement>(
+      `[name="${field.name}"]`,
+    );
+    if (control !== null) {
       values[field.name] = control.value;
     }
   }
   return values;
+}
+
+/**
+ * 把一个字段渲染成「标签 + 控件 + 提示」的组。
+ * 控件 id 固定为 `field-{name}`：同一容器内不要出现同名字段。
+ */
+export function renderFieldGroup(field: FieldSpec): HTMLElement {
+  const wrapper = el(
+    "div",
+    field.wide === true
+      ? "flex min-w-0 flex-col gap-1.5 sm:col-span-2"
+      : "flex min-w-0 flex-col gap-1.5",
+  );
+  const label = el("label", LABEL_CLASS, field.label);
+  if (field.kind !== "checkboxes") {
+    label.htmlFor = `field-${field.name}`;
+  }
+  wrapper.append(label, fieldControl(field));
+  if (field.hint !== undefined && field.hint !== "") {
+    wrapper.append(el("p", HINT_CLASS, field.hint));
+  }
+  return wrapper;
+}
+
+function collect(form: HTMLFormElement, fields: readonly FieldSpec[]): FormValues {
+  return collectValues(form, fields);
 }
 
 /** 生成「点击遮罩关闭」的 daisyUI 背景层。 */

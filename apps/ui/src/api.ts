@@ -272,10 +272,18 @@ export async function mutate(
   return { kind: "ok", state: payload as ConsoleState };
 }
 
-/** 上游 `/models` 的一个条目（已归一化成 id + 展示名）。 */
+/**
+ * 上游 `/models` 的一个条目（已归一化）。服务端会按别名映射标准字段
+ * （context_window / max_output_tokens / input_modalities / reasoning），
+ * 取不到的字段直接省略，前端不做推断。
+ */
 export interface UpstreamModel {
   id: string;
   name?: string | null;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_modalities?: string[];
+  reasoning?: boolean;
 }
 
 export type UpstreamModelsResult =
@@ -349,10 +357,26 @@ async function parseUpstreamModels(
     if (typeof id !== "string" || id.trim() === "") {
       continue;
     }
-    models.push({
+    const model: UpstreamModel = {
       id,
       name: typeof item.name === "string" ? item.name : null,
-    });
+    };
+    if (typeof item.context_window === "number") {
+      model.context_window = item.context_window;
+    }
+    if (typeof item.max_output_tokens === "number") {
+      model.max_output_tokens = item.max_output_tokens;
+    }
+    if (
+      Array.isArray(item.input_modalities) &&
+      item.input_modalities.every((kind) => typeof kind === "string")
+    ) {
+      model.input_modalities = item.input_modalities as string[];
+    }
+    if (typeof item.reasoning === "boolean") {
+      model.reasoning = item.reasoning;
+    }
+    models.push(model);
   }
   return { kind: "ok", models };
 }

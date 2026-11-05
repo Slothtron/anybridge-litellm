@@ -7,6 +7,7 @@
  */
 
 import type { ConsoleState, ModelEntry, ProviderEntry } from "./api";
+import { icon, type IconName } from "./icons";
 
 /** 控制台的两个视图；顶部导航切换，切视图不刷新页面。 */
 export type View = "providers" | "about";
@@ -115,31 +116,62 @@ async function writeClipboard(text: string): Promise<void> {
 }
 
 function copyButton(text: string, label = text): HTMLButtonElement {
-  const button = el(
-    "button",
-    "btn btn-xs btn-ghost shrink-0 font-normal text-subtle",
-    "复制",
-  );
+  const button = el("button", "btn btn-xs btn-ghost shrink-0 text-subtle");
   button.type = "button";
+  button.append(icon("clipboard"));
   button.title = `复制 ${label}`;
   // 20 多个按钮的可访问名都是「复制」，只有 title 对读屏不可靠。
   button.setAttribute("aria-label", `复制 ${label}`);
+  const swap = (name: IconName, hint: string): void => {
+    button.textContent = "";
+    button.append(icon(name));
+    button.title = hint;
+  };
   button.addEventListener("click", () => {
     void (async () => {
       try {
         await writeClipboard(text);
-        button.textContent = "已复制";
+        swap("check", "已复制");
       } catch {
-        button.textContent = "复制失败";
+        swap("clipboard", "复制失败");
       }
       button.disabled = true;
       window.setTimeout(() => {
-        button.textContent = "复制";
+        swap("clipboard", `复制 ${label}`);
         button.disabled = false;
       }, 1200);
     })();
   });
   return button;
+}
+
+/** 图标按钮：读屏名来自 `label`（aria-label + title），视觉只有图标。 */
+export function iconButton(
+  name: IconName,
+  label: string,
+  onClick: () => void,
+  extraClass = "",
+): HTMLButtonElement {
+  const button = el("button", `btn btn-xs btn-ghost shrink-0 ${extraClass}`.trim());
+  button.type = "button";
+  button.append(icon(name));
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/**
+ * provider 的完整接入地址：`http://{bind}{base_path}`（base_path 已含前缀与 `/v1`）。
+ * 复制即可作为客户端的 base_url 使用；bind 缺失时返回空串（渲染成 `-`）。
+ */
+export function gatewayEndpoint(state: ConsoleState, provider: ProviderEntry): string {
+  const bind = typeof state.bind === "string" ? state.bind.trim() : "";
+  const base = typeof provider.base_path === "string" ? provider.base_path.trim() : "";
+  if (bind === "" || base === "") {
+    return "";
+  }
+  return `http://${bind}${base}`;
 }
 
 function actionButton(
@@ -367,47 +399,168 @@ function portOf(bind: string | undefined): string | undefined {
   return index >= 0 && index < bind.length - 1 ? bind.slice(index + 1) : bind;
 }
 
-function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLElement {
+/** 首页 provider 卡片：只做「入口」，点卡片进详情页，元信息与模型列表都在详情。 */
+function renderProviderCard(provider: ProviderEntry, state: ConsoleState): HTMLElement {
   const models = provider.models ?? [];
-  const card = el("article", "rounded-box border border-base-300 bg-base-100 shadow-sm");
-  const body = el("div", "flex flex-col gap-4 p-4 sm:p-5");
-
-  const head = el("div", "flex flex-wrap items-center gap-2");
   const displayName =
     typeof provider.display_name === "string" && provider.display_name.trim() !== ""
       ? provider.display_name.trim()
       : textOrDash(provider.name);
+
+  const card = el(
+    "article",
+    "relative rounded-box border border-base-300 bg-base-100 shadow-sm transition-colors hover:border-primary",
+  );
+
+  // stretched-link：整卡可点，键盘/读屏走这个链接；互操作元素加 `relative z-10` 盖在它上面。
+  const link = el("a", "absolute inset-0 rounded-box");
+  link.href = `#/provider/${encodeURIComponent(provider.name)}`;
+  link.setAttribute("aria-label", `查看 ${displayName} 详情`);
+  card.append(link);
+
+  const body = el("div", "flex flex-col gap-2 p-4 sm:p-5");
+
+  const head = el("div", "flex flex-wrap items-center gap-2 pr-1");
   head.append(el("h3", "text-sm font-semibold", displayName));
-  // 有展示名时把 id 放到旁边（路径与配置都以 id 为准）。
   if (displayName !== provider.name) {
     head.append(el("code", "font-mono text-xs text-muted", textOrDash(provider.name)));
   }
   head.append(apiBadge(provider.api));
   head.append(
+    el("span", "text-xs text-muted", `${formatNumber(models.length)} 个模型`),
+  );
+  const configured = provider.api_key?.configured;
+  if (configured !== undefined) {
+    head.append(
+      el(
+        "span",
+        `ml-auto badge badge-sm ${configured ? "badge-success" : "badge-warning"}`,
+        configured ? "已配置" : "未配置",
+      ),
+    );
+  }
+  body.append(head);
+
+  const endpoint = gatewayEndpoint(state, provider);
+  const endpointRow = el(
+    "div",
+    "flex min-w-0 flex-wrap items-center gap-1.5 sm:flex-nowrap",
+  );
+  endpointRow.append(
     el(
       "span",
-      "text-xs text-muted",
-      `${formatNumber(models.length)} 个模型`,
+      "shrink-0 text-xs text-muted",
+      "接入地址",
     ),
   );
+  if (endpoint === "") {
+    endpointRow.append(el("span", "text-subtle", "-"));
+  } else {
+    const code = el(
+      "code",
+      "min-w-0 truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs",
+      endpoint,
+    );
+    code.title = endpoint;
+    endpointRow.append(code, copyButton(endpoint, "接入地址"));
+  }
+  body.append(endpointRow);
+
+  card.append(body);
+  return card;
+}
+
+/** 详情页的模型面板：标题 + 新增模型 + 表格 / 空态。首页卡片不再内嵌。 */
+function renderModelsPanel(provider: ProviderEntry, actions: RowActions): HTMLElement {
+  const models = provider.models ?? [];
+  const panel = el("div", "border-t border-base-300/70 pt-3");
+  const head = el(
+    "div",
+    "mb-2 flex flex-wrap items-center justify-between gap-2",
+  );
+  head.append(
+    el(
+      "h4",
+      "text-xs font-semibold uppercase tracking-[0.14em] text-muted",
+      `模型 (${formatNumber(models.length)})`,
+    ),
+  );
+  if (actions.editable) {
+    head.append(
+      actionButton("新增模型", "btn btn-xs max-sm:btn-sm", () =>
+        actions.onCreateModel(provider),
+      ),
+    );
+  }
+  panel.append(head);
+
+  if (models.length === 0) {
+    panel.append(
+      el(
+        "p",
+        "m-0 rounded-lg border border-dashed border-base-300 px-4 py-6 text-center text-xs text-subtle",
+        "该 provider 未配置模型。",
+      ),
+    );
+    return panel;
+  }
+  panel.append(renderModelTable(provider, models, actions));
+  return panel;
+}
+
+/** provider 详情页：完整元信息 + 模型列表；首页卡片点击后到达。 */
+export function renderProviderDetail(
+  shell: Shell,
+  state: ConsoleState,
+  provider: ProviderEntry,
+  actions: RowActions,
+): void {
+  applyServiceName(shell, state);
+  const content = shell.content;
+  content.textContent = "";
+
+  const displayName =
+    typeof provider.display_name === "string" && provider.display_name.trim() !== ""
+      ? provider.display_name.trim()
+      : textOrDash(provider.name);
+
+  const section = el("section", "mt-8 flex flex-col gap-4");
+
+  // ---- 头部：返回 + 标题 + provider 级操作 ----
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  const back = el("a", "btn btn-sm btn-ghost -ml-2 gap-1.5 text-muted");
+  back.href = "#/";
+  back.append(icon("arrow-left"), document.createTextNode("返回"));
+  head.append(back);
+  head.append(el("h2", "text-lg font-semibold", displayName));
+  if (displayName !== provider.name) {
+    head.append(el("code", "font-mono text-xs text-muted", textOrDash(provider.name)));
+  }
+  head.append(apiBadge(provider.api));
   if (actions.editable) {
     const tools = el("div", "ml-auto flex gap-1.5");
     tools.append(
       actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
         actions.onEditProvider(provider),
       ),
-      actionButton("删除", "btn btn-xs btn-ghost text-error max-sm:btn-sm", () =>
+      iconButton("trash", `删除 provider ${provider.name}`, () =>
         actions.onDeleteProvider(provider),
-      ),
+      "text-error"),
     );
     head.append(tools);
   }
-  body.append(head);
+  section.append(head);
 
+  // ---- 元信息卡 ----
+  const card = el(
+    "div",
+    "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm sm:p-5",
+  );
   const meta = el(
     "dl",
     "m-0 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 xl:grid-cols-3",
   );
+  meta.append(metaRow("接入地址", gatewayEndpoint(state, provider)));
   meta.append(metaRow("base_url", provider.base_url));
   meta.append(metaRow("base_path", provider.base_path));
   meta.append(apiKeyRow(provider));
@@ -419,48 +572,18 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
     ),
   );
   meta.append(metaRow("api_version", provider.api_version, false));
-  body.append(meta);
+  card.append(meta);
+  section.append(card);
 
-  // 模型列表收进 provider 详情，不再单独占一个页面区块。
-  const modelsPanel = el("div", "border-t border-base-300/70 pt-3");
-  const modelsHead = el(
-    "div",
-    "mb-2 flex flex-wrap items-center justify-between gap-2",
-  );
-  modelsHead.append(
-    el(
-      "h4",
-      "text-xs font-semibold uppercase tracking-[0.14em] text-muted",
-      `模型 (${formatNumber(models.length)})`,
-    ),
-  );
-  if (actions.editable) {
-    modelsHead.append(
-      actionButton("新增模型", "btn btn-xs max-sm:btn-sm", () =>
-        actions.onCreateModel(provider),
-      ),
-    );
-  }
-  modelsPanel.append(modelsHead);
-
-  if (models.length === 0) {
-    modelsPanel.append(
-      el(
-        "p",
-        "m-0 rounded-lg border border-dashed border-base-300 px-4 py-6 text-center text-xs text-subtle",
-        "该 provider 未配置模型。",
-      ),
-    );
-  } else {
-    modelsPanel.append(renderModelTable(provider, models, actions));
-  }
-  body.append(modelsPanel);
-
-  card.append(body);
-  return card;
+  section.append(renderModelsPanel(provider, actions));
+  content.append(section);
 }
 
-function renderProviders(providers: ProviderEntry[], actions: RowActions): HTMLElement {
+function renderProviders(
+  providers: ProviderEntry[],
+  state: ConsoleState,
+  actions: RowActions,
+): HTMLElement {
   const section = el("section", "mt-8");
   const create = actions.editable
     ? actionButton("新增 Provider", "btn btn-sm btn-primary", actions.onCreateProvider)
@@ -479,7 +602,7 @@ function renderProviders(providers: ProviderEntry[], actions: RowActions): HTMLE
 
   const grid = el("div", "grid grid-cols-1 gap-4");
   for (const provider of providers) {
-    grid.append(renderProviderCard(provider, actions));
+    grid.append(renderProviderCard(provider, state));
   }
   section.append(grid);
   return section;
@@ -549,8 +672,11 @@ function renderModelTable(
         actionButton("编辑", "btn btn-xs max-sm:btn-sm", () =>
           actions.onEditModel(provider, model),
         ),
-        actionButton("删除", "btn btn-xs btn-ghost text-error max-sm:btn-sm", () =>
-          actions.onDeleteModel(provider, model),
+        iconButton(
+          "trash",
+          `删除模型 ${model.id}`,
+          () => actions.onDeleteModel(provider, model),
+          "text-error",
         ),
       );
       tools.append(group);
@@ -700,5 +826,5 @@ export function renderState(
     content.append(note);
   }
 
-  content.append(renderProviders(providers, actions));
+  content.append(renderProviders(providers, state, actions));
 }

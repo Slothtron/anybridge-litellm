@@ -59,7 +59,10 @@
 | 场景 | 约定 |
 |---|---|
 | 对话框 | 原生 `<dialog class="modal">` + `modal-box`；表单与删除确认共用，不用原生 `confirm()` |
-| 行内删除 | `btn-ghost text-error`（低权重），危险确认才用 `btn-error` |
+| 行内删除 | 图标按钮（trash SVG，`btn-ghost text-error` + `aria-label`），危险确认才用 `btn-error` |
+| 图标按钮 | Heroicons outline 内联 SVG（`icons.ts`），只用 `currentColor`；一律带 `aria-label`，不用 emoji |
+| 复制 | clipboard 图标按钮，成功后短暂切 check + title「已复制」 |
+| 路由 | hash 路由：`#/` 列表、`#/provider/{id}` 详情、`#/about` 关于；首页卡片只做入口（stretched-link 整卡可点） |
 | 焦点 | `input` / `select` 的 `--input-color` 指向 `--color-primary`，不跟 daisyUI 默认近黑色 |
 | 宽表格 | `min-w-[760px]` + 外层 `overflow-x-auto`，窄视口横向滚动而不是把 id 挤成竖排 |
 | 输入行高 | `.input` 的 `line-height` 等于控件高度，避免下划线被行盒裁掉 |
@@ -125,3 +128,4 @@ cd apps/ui && npm run dev -- --host 127.0.0.1
 |---|---|
 | 2026-11-05 | v1：四条硬约束、主色/强调色切 `#1E40AF` + `#D97706`、warning 推黄色、门禁（构建 / 全量 / 视觉走查） |
 | 2026-11-05 | v1.1 落地：15 处任意字号（`text-[11px]` ×14、`text-[11.5px]` ×1）统一为 `text-xs`；4 处裸 `text-base` 归入四档（h1 → `text-2xl`，弹窗 h2 → `text-lg`）；2 处行内删除按钮 `btn-error btn-soft` → `btn-ghost text-error` |
+| 2026-11-05 | v1.2 落地：移除新增对话框的预设/tab（单列表单）；「获取可用模型」改弹窗勾选导入，上游标准字段（context_window / max_output_tokens / input_modalities / reasoning，含别名）自动预填；目录行 icon 按钮 + 手风琴就地配置模型；行内删除与复制改图标按钮；首页卡片瘦身为入口（展示完整接入地址 `http://{bind}{base_path}`），新增 `#/provider/{id}` hash 路由详情页承接元信息与模型表 |
