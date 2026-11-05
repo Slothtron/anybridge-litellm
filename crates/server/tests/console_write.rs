@@ -1007,10 +1007,37 @@ async fn upstream_models_handler() -> axum::Json<Value> {
     }))
 }
 
+/// 假上游原生列表（`universal/model_list`）：容量与多模态只在这里。
+async fn universal_models_handler() -> axum::Json<Value> {
+    axum::Json(json!({
+        "code": 0,
+        "msg": "success",
+        "data": {
+            "model_list": [
+                // 与标准列表同 id：补 context_window / input_modalities；
+                // 标准列表已有的 thinking_levels 不被覆盖。
+                {"model_name": "codeplan", "max_tokens": 1000000, "is_multi_modal": false,
+                 "thinking_levels": ["high", "max"]},
+                {"model_name": "o4-reasoning", "max_tokens": 300000, "is_multi_modal": true,
+                 "thinking_levels": ["low"]},
+                // 原生列表独有：追加成新条目。
+                {"model_name": "rich-only", "max_tokens": 128000, "is_multi_modal": true},
+                // 没有 model_name 也没有 id：跳过。
+                {"max_tokens": 1},
+            ],
+        },
+    }))
+}
+
 #[tokio::test]
 async fn upstream_models_can_be_imported_selectively() {
-    // 1. 起一个假上游。
-    let upstream = Router::new().route("/v1/models", axum::routing::get(upstream_models_handler));
+    // 1. 起一个假上游（标准列表 + 原生列表）。
+    let upstream = Router::new()
+        .route("/v1/models", axum::routing::get(upstream_models_handler))
+        .route(
+            "/v1/universal/model_list",
+            axum::routing::get(universal_models_handler),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1069,8 +1096,10 @@ async fn upstream_models_can_be_imported_selectively() {
             "dsh-style",
             "codeplan",
             "conflict",
-            "legacy"
-        ]
+            "legacy",
+            "rich-only"
+        ],
+        "原生列表独有的模型追加到末尾"
     );
 
     // 标准字段映射：别名归一、非法值省略，取不到就不出现键。
@@ -1105,12 +1134,40 @@ async fn upstream_models_can_be_imported_selectively() {
     assert_eq!(
         codeplan["thinking_levels"],
         json!(["high", "max", "low"]),
-        "档位去重保序、空串剔除：{codeplan:?}"
+        "档位去重保序、空串剔除，且不被原生列表覆盖：{codeplan:?}"
     );
     assert_eq!(
         codeplan["reasoning"], true,
         "档位非空即支持推理：{codeplan:?}"
     );
+    // 原生列表（universal/model_list）补齐容量与模态：max_tokens → context_window，
+    // is_multi_modal → input_modalities（false 只给 text）。
+    assert_eq!(
+        codeplan["context_window"], 1000000,
+        "max_tokens 补 context_window：{codeplan:?}"
+    );
+    assert_eq!(
+        codeplan["input_modalities"],
+        json!(["text"]),
+        "is_multi_modal=false → 仅文本：{codeplan:?}"
+    );
+    let o4 = models.iter().find(|m| m["id"] == "o4-reasoning").unwrap();
+    assert_eq!(o4["reasoning"], false, "标准列表的显式声明优先：{o4:?}");
+    assert_eq!(
+        o4["context_window"], 200000,
+        "标准列表已有的容量不被原生列表覆盖：{o4:?}"
+    );
+    assert!(
+        o4.get("thinking_levels").is_none(),
+        "reasoning:false 时原生列表的档位不能插入（否则配置校验会拒绝）：{o4:?}"
+    );
+    let rich_only = models.iter().find(|m| m["id"] == "rich-only").unwrap();
+    assert_eq!(
+        rich_only["input_modalities"],
+        json!(["text", "image"]),
+        "is_multi_modal=true → 文本+图片：{rich_only:?}"
+    );
+    assert_eq!(rich_only["context_window"], 128000);
     let conflict = models.iter().find(|m| m["id"] == "conflict").unwrap();
     assert_eq!(
         conflict["reasoning"], false,

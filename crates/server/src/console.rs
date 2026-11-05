@@ -639,6 +639,138 @@ fn normalize_upstream_model(id: &str, item: &Value) -> Value {
     Value::Object(model)
 }
 
+/// 上游请求构造器：同一套鉴权头，供标准列表与原生列表两个请求复用。
+fn upstream_get(
+    state: &AppState,
+    url: &str,
+    api: anybridge_litellm_core::ApiKind,
+    api_version: Option<&str>,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let builder = state
+        .client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(30));
+    match api {
+        anybridge_litellm_core::ApiKind::Anthropic => builder
+            .header("x-api-key", api_key)
+            .header("anthropic-version", api_version.unwrap_or("2023-06-01")),
+        _ => builder.header("authorization", format!("Bearer {api_key}")),
+    }
+}
+
+/// 上游原生模型列表（`{base_url}/universal/model_list`，WPSAI 等自建网关）：
+/// 标准 `/models` 只给 id 与思考档位，容量与模态在这里。
+///
+/// 返回 `model_name`/`max_tokens`/`is_multi_modal`/`thinking_levels` 条目；
+/// **尽力而为**：端点不存在或不可用返回 `None`，不影响标准列表。
+async fn fetch_universal_models(
+    state: &AppState,
+    base_url: &str,
+    api: anybridge_litellm_core::ApiKind,
+    api_version: Option<&str>,
+    api_key: &str,
+) -> Option<Vec<Value>> {
+    let url = format!("{}/universal/model_list", base_url.trim_end_matches('/'));
+    let response = upstream_get(state, &url, api, api_version, api_key)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = serde_json::from_str(&response.text().await.ok()?).ok()?;
+    let items = body
+        .get("data")
+        .and_then(|data| data.get("model_list"))
+        .or_else(|| body.get("model_list"))
+        .or_else(|| body.get("data"))?;
+    Some(items.as_array().cloned().unwrap_or_default())
+}
+
+/// 原生列表 → 标准字段（只产出现有信息的键）。
+fn universal_model_fields(entry: &Value) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    if let Some(max_tokens) = entry.get("max_tokens").and_then(Value::as_u64) {
+        // 上游把上下文窗口叫 `max_tokens`（如 deepseek 1M / glm 128K）。
+        fields.insert("context_window".into(), max_tokens.into());
+    }
+    if let Some(multi) = entry.get("is_multi_modal").and_then(Value::as_bool) {
+        let modalities: Vec<&str> = if multi {
+            vec!["text", "image"]
+        } else {
+            vec!["text"]
+        };
+        fields.insert("input_modalities".into(), modalities.into());
+    }
+    let mut levels: Vec<&str> = Vec::new();
+    for level in entry
+        .get("thinking_levels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|level| !level.trim().is_empty())
+    {
+        if !levels.contains(&level) {
+            levels.push(level);
+        }
+    }
+    if !levels.is_empty() {
+        fields.insert("reasoning".into(), true.into());
+        fields.insert("thinking_levels".into(), levels.into());
+    }
+    fields
+}
+
+/// 把原生列表按 id 合并进标准列表：只补标准列表缺的键，标准列表优先；
+/// 原生列表里独有的模型追加到末尾。
+fn merge_universal_models(models: &mut Vec<Value>, universal: &[Value]) {
+    let index: std::collections::HashMap<String, usize> = models
+        .iter()
+        .enumerate()
+        .filter_map(|(position, model)| {
+            model
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), position))
+        })
+        .collect();
+
+    for entry in universal {
+        let Some(id) = entry
+            .get("model_name")
+            .or_else(|| entry.get("id"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let mut fields = universal_model_fields(entry);
+        match index.get(id) {
+            Some(&position) => {
+                let Some(model) = models[position].as_object_mut() else {
+                    continue;
+                };
+                // 标准列表显式声明不支持推理时，原生列表的档位不能插进去：
+                // `reasoning: false` 与 `thinking_levels` 并存会被配置校验拒绝。
+                if model.get("reasoning").and_then(Value::as_bool) == Some(false) {
+                    fields.remove("reasoning");
+                    fields.remove("thinking_levels");
+                }
+                for (key, value) in fields {
+                    model.entry(key).or_insert(value);
+                }
+            }
+            None => {
+                let mut model = serde_json::Map::new();
+                model.insert("id".into(), id.into());
+                model.extend(fields);
+                models.push(Value::Object(model));
+            }
+        }
+    }
+}
+
 async fn fetch_upstream_models(
     state: &AppState,
     base_url: &str,
@@ -647,16 +779,7 @@ async fn fetch_upstream_models(
     api_key: &str,
 ) -> Result<Vec<Value>, UpstreamFailure> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut builder = state
-        .client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(30));
-    builder = match api {
-        anybridge_litellm_core::ApiKind::Anthropic => builder
-            .header("x-api-key", api_key)
-            .header("anthropic-version", api_version.unwrap_or("2023-06-01")),
-        _ => builder.header("authorization", format!("Bearer {api_key}")),
-    };
+    let builder = upstream_get(state, &url, api, api_version, api_key);
 
     let response = builder.send().await.map_err(|err| {
         UpstreamFailure::new(
@@ -698,7 +821,7 @@ async fn fetch_upstream_models(
         .cloned()
         .or_else(|| body.is_array().then(|| body.clone()))
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    Ok(items
+    let mut models: Vec<Value> = items
         .as_array()
         .map(|items| {
             items
@@ -709,7 +832,15 @@ async fn fetch_upstream_models(
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+
+    // 标准列表缺容量/模态时，用上游原生列表补齐（尽力而为，失败不影响主列表）。
+    if let Some(universal) =
+        fetch_universal_models(state, base_url, api, api_version, api_key).await
+    {
+        merge_universal_models(&mut models, &universal);
+    }
+    Ok(models)
 }
 
 /// `PUT /console/api/providers/{provider}/models`：用整份 id 列表同步模型目录。
