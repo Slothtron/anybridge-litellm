@@ -317,7 +317,9 @@ providers:
 |---|---|
 | 引用语法 | `credential/<name>`，`<name>` 匹配 `^[A-Za-z_][A-Za-z0-9_]*$`，≤ 64 字节 |
 | 命名约定 | 控制台按 `upper(provider id)` + `_API_KEY` 派生（`-` → `_`），表单里只读展示，不接受手填 |
-| 存储 | `credentials.yaml` 的 `credentials` 映射；默认 `$XDG_CONFIG_HOME/anybridge-litellm/credentials.yaml`，可被 `credentials.file` 覆盖 |
+| 存储 | `credentials.yaml` 的 `refs` 映射（对齐 dsh；旧 `credentials:` 顶层键加载即报错并提示迁移）；默认 `$XDG_CONFIG_HOME/anybridge-litellm/credentials.yaml`，可被 `credentials.file` 覆盖 |
+| 对外 key | 同一文件的 `keys` 段：`{name, hash(sha256), scope[], description, created_at, enabled}`；明文只在创建/轮换时返回一次，scope 为 provider id 列表或 `*` |
+| 鉴权 | master key 不受 scope 限制；对外 key 越权返回 `403 scope_denied` |
 | 权限 | `0600`，写盘走「同目录临时文件 + `fsync` + `rename`」；文件不存在 = 全部未配置 |
 | 解析时机 | **每次请求**调用 `CredentialStore::resolve`，轮换后下一次请求即生效，不重启 |
 | 插拔点 | `trait CredentialStore { resolve, describe, list, set, unset }`；本期只有 `YamlCredentialStore` |
@@ -335,9 +337,10 @@ providers:
 |---|---|
 | `ApiKind` | `Completions` \| `Anthropic` \| `Responses` |
 | `Modality` | `Text` \| `Image` |
-| `ProviderConfig` | `name, api, base_url, api_key: CredentialRef, api_version, timeout, models[]` |
+| `ProviderConfig` | `name, api, base_url, api_key: Option<CredentialRef>, headers: Vec<(String, HeaderSource)>, api_version, timeout, models[]` |
 | `ModelEntry` | `id, name, context_window, max_output_tokens, input: Option<Vec<Modality>>, reasoning: Option<bool>, thinking_levels: Vec<String>`（`api` 只在 provider 级；无 `alias`；默认档位属于客户端配置） |
-| `ModelRoute` | `provider, api, model_id, base_url, api_key: &CredentialRef, api_version, timeout` + `ModelEntry` 的展示/能力字段 |
+| `ModelRoute` | `provider, api, model_id, base_url, api_key: Option<&CredentialRef>, headers, api_version, timeout` + `ModelEntry` 的展示/能力字段 |
+| `ApiKeyInfo` | `name, scope: Vec<String>, description, created_at, enabled`（对外 API key；摘要只在存储内部） |
 | `PassthroughRequest` | `provider, tail, model_id, body: Bytes`（原始字节，原样转发） |
 | `UpstreamResponse` | `status, headers, body: Stream<Bytes>`（JSON 与 SSE 同一条通道） |
 | `GatewayError` | `kind, status, code, message, upstream_status` |
@@ -345,7 +348,8 @@ providers:
 - 查找键是 `(provider, model)`，`model` 必须与配置的 `id` 完全相等。
 - **请求体一个字节不改**：只解析出来读 `model` 做白名单校验，转发时用原始 `Bytes`；不重新序列化，因此键序、空白、数值精度、未知字段全部保持原样。非 JSON body 直接 400 `invalid_request`（三种协议都是 JSON）。
 - **响应体不改**：status、`content-type`、其它头、body 字节直通；`text/event-stream` 用 `Body::from_stream` 逐块透传，**不解帧、不补 `[DONE]`、不重组**。
-- 转发头策略：丢弃 `host`、`content-length`、`accept-encoding`，其余原样带上；追加 `authorization`/`x-api-key`（按 `api` 类型：`anthropic` 用 `x-api-key` + `anthropic-version`，其余用 `authorization: Bearer`）。
+- 转发头策略：丢弃 `host`、`content-length`、`accept-encoding`、`connection`、`transfer-encoding` 与客户端鉴权头；先注入 `authorization`/`x-api-key`（按 `api` 类型：`anthropic` 用 `x-api-key` + `anthropic-version`，其余用 `authorization: Bearer`），再写入 provider 的 `headers`（最后写入，可覆盖同名头）。`api_key` 省略时不注入任何鉴权头。
+- 鉴权：先比 `auth.master_key`，再查启用的对外 API key；对外 key 的 `scope` 不含请求的 provider 时返回 `403 scope_denied`。
 - `/llmproxy/{provider}/v1/models` 返回标准四字段 + 三项可选扩展；不出现 `x_*` 自定义命名空间：
 
 ```json

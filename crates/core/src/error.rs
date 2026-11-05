@@ -2,10 +2,12 @@
 
 use serde_json::{json, Value};
 
-/// 八种稳定错误类别，对应设计文档 §8。
+/// 九种稳定错误类别，对应设计文档 §8。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     AuthError,
+    /// 客户端 API key 有效，但 scope 不含请求的 provider。
+    ScopeDenied,
     ProviderNotFound,
     ProviderRequired,
     ApiMismatch,
@@ -21,6 +23,7 @@ impl ErrorKind {
     pub fn r#type(&self) -> &'static str {
         match self {
             ErrorKind::AuthError => "auth_error",
+            ErrorKind::ScopeDenied => "scope_denied",
             ErrorKind::ProviderNotFound => "provider_not_found",
             ErrorKind::ProviderRequired => "provider_required",
             ErrorKind::ApiMismatch => "api_mismatch",
@@ -35,6 +38,7 @@ impl ErrorKind {
     pub fn status(&self) -> u16 {
         match self {
             ErrorKind::AuthError => 401,
+            ErrorKind::ScopeDenied => 403,
             ErrorKind::ProviderNotFound
             | ErrorKind::ProviderRequired
             | ErrorKind::ApiMismatch
@@ -112,6 +116,7 @@ mod tests {
     fn kind_maps_to_status_and_type() {
         let table = [
             (ErrorKind::AuthError, 401, "auth_error"),
+            (ErrorKind::ScopeDenied, 403, "scope_denied"),
             (ErrorKind::ProviderNotFound, 404, "provider_not_found"),
             (ErrorKind::ProviderRequired, 404, "provider_required"),
             (ErrorKind::ApiMismatch, 404, "api_mismatch"),

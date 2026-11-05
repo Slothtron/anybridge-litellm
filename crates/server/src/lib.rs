@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use anybridge_litellm_core::passthrough::{allows, extract_model};
 use anybridge_litellm_core::{
-    extract_presented, verify_master_key, ApiKind, CredentialRef, CredentialStore, ErrorKind,
-    GatewayConfig, GatewayError, YamlCredentialStore,
+    extract_presented, scope_allows, verify_master_key, ApiKeyStore, ApiKind, CredentialRef,
+    CredentialStore, ErrorKind, GatewayConfig, GatewayError, HeaderSource, YamlApiKeyStore,
+    YamlCredentialStore,
 };
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -42,6 +43,8 @@ pub struct AppState {
     pub config: Arc<ConfigStore>,
     /// 凭据存储：provider 的 `api_key` 是引用，**每次请求**重新解析。
     pub credentials: Arc<dyn CredentialStore>,
+    /// 对外 API key 存储：与凭据共用 `credentials.yaml` 的 `keys` 段。
+    pub api_keys: Arc<dyn ApiKeyStore>,
     pub client: reqwest::Client,
     /// 控制台随机 token：只经 stderr 打印的 URL 分发，不进配置、不进日志。
     /// 它只用于 `?token=` 一次性交换会话 cookie。
@@ -74,7 +77,8 @@ impl AppState {
     ) -> Self {
         Self {
             config: Arc::new(ConfigStore::new(config, config_path, bind_override)),
-            credentials: Arc::new(YamlCredentialStore::new(credentials_path)),
+            credentials: Arc::new(YamlCredentialStore::new(credentials_path.clone())),
+            api_keys: Arc::new(YamlApiKeyStore::new(credentials_path)),
             client: build_client(),
             console_token,
             session: console::ConsoleSession::ephemeral(),
@@ -150,12 +154,16 @@ async fn models_route(
         .await;
     }
 
-    if let Err(err) = authorize(&state, &parts.headers) {
-        return error_response(err);
-    }
+    let access = match authorize(&state, &parts.headers) {
+        Ok(access) => access,
+        Err(err) => return error_response(err),
+    };
     let snapshot = state.snapshot();
     if !snapshot.config.providers.contains_key(&provider) {
         return error_response(provider_not_found(&snapshot, &provider));
+    }
+    if !access.allows(&provider) {
+        return error_response(scope_denied(&provider));
     }
 
     match snapshot.config.model_cards(&provider) {
@@ -196,9 +204,10 @@ async fn proxy_request(
     body: Body,
 ) -> Response {
     // 1. 鉴权先于一切业务判断。
-    if let Err(err) = authorize(&state, &headers) {
-        return error_response(err);
-    }
+    let access = match authorize(&state, &headers) {
+        Ok(access) => access,
+        Err(err) => return error_response(err),
+    };
 
     // 2. 未知 provider / 白名单校验都在读 body 之前完成。
     //    一次请求只取一份快照：控制台热加载不会让同一请求看到半个配置。
@@ -207,6 +216,9 @@ async fn proxy_request(
         Some(config) => config.api,
         None => return error_response(provider_not_found(&snapshot, &provider)),
     };
+    if !access.allows(&provider) {
+        return error_response(scope_denied(&provider));
+    }
     if !allows(api, &tail) {
         return error_response(GatewayError::new(
             ErrorKind::ApiMismatch,
@@ -256,6 +268,7 @@ async fn proxy_request(
                 api: route.api,
                 base_url: route.base_url,
                 api_key: route.api_key,
+                headers: route.headers,
                 api_version: route.api_version,
                 timeout: route.timeout,
             },
@@ -267,49 +280,28 @@ async fn proxy_request(
             Target {
                 api: provider_config.api,
                 base_url: &provider_config.base_url,
-                api_key: &provider_config.api_key,
+                api_key: provider_config.api_key.as_ref(),
+                headers: &provider_config.headers,
                 api_version: provider_config.api_version.as_deref(),
                 timeout: provider_config.timeout,
             },
         )
     };
 
-    // 5. 解析凭据：每次请求重新解析，控制台轮换密钥后下一次请求即生效。
-    let api_key = match state.credentials.resolve(target.api_key) {
-        Some(credential) => credential.value,
-        None => {
-            return error_response(GatewayError::new(
-                ErrorKind::CredentialNotConfigured,
-                format!(
-                    "凭据 `{}` 未配置：请在控制台写入，或写进凭据文件",
-                    target.api_key
-                ),
-            ));
-        }
+    // 5. 组装请求头：先转发客户端头，再注入 API 密钥头，最后写 provider
+    //    自定义头（覆盖同名头）。`api_key` 缺省时不注入任何鉴权头。
+    let forwarded = match build_forward_headers(&state, &headers, &target) {
+        Ok(forwarded) => forwarded,
+        Err(err) => return error_response(err),
     };
 
     // 6. 拼上游 URL（保留原 query string）。
     let url = upstream_url(target.base_url, &tail, uri.query());
 
     let mut builder = state.client.request(method, &url);
-    for (name, value) in headers.iter() {
-        if !should_forward_request_header(name.as_str()) {
-            continue;
-        }
+    for (name, value) in forwarded.iter() {
         builder = builder.header(name, value);
     }
-    builder = match target.api {
-        ApiKind::Anthropic => {
-            let version = target
-                .api_version
-                .or_else(|| target.api.default_api_version())
-                .unwrap_or("2023-06-01");
-            builder
-                .header("x-api-key", api_key)
-                .header("anthropic-version", version)
-        }
-        _ => builder.header("authorization", format!("Bearer {api_key}")),
-    };
 
     // 7. 发送；超时或连接错误统一 502。
     let started = Instant::now();
@@ -394,8 +386,26 @@ fn provider_not_found(snapshot: &Snapshot, provider: &str) -> GatewayError {
     )
 }
 
-/// master key 校验。失败时带 `WWW-Authenticate: Bearer`。
-fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {
+/// 客户端出示凭据后的访问级别。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientAccess {
+    /// master key：不受 scope 限制。
+    Master,
+    /// 对外 API key：只能访问 scope 内的 provider。
+    Scoped(Vec<String>),
+}
+
+impl ClientAccess {
+    fn allows(&self, provider: &str) -> bool {
+        match self {
+            ClientAccess::Master => true,
+            ClientAccess::Scoped(scope) => scope_allows(scope, provider),
+        }
+    }
+}
+
+/// 鉴权：先比 master key，再查启用的对外 API key。失败时带 `WWW-Authenticate: Bearer`。
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<ClientAccess, GatewayError> {
     let presented = extract_presented(
         headers
             .get(header::AUTHORIZATION)
@@ -405,13 +415,102 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> 
             .and_then(|value| value.to_str().ok()),
     );
     if verify_master_key(&state.snapshot().config.auth.master_key, presented) {
-        Ok(())
-    } else {
-        Err(GatewayError::new(
-            ErrorKind::AuthError,
-            "master key 缺失或无效",
-        ))
+        return Ok(ClientAccess::Master);
     }
+    if let Some(token) = presented {
+        if let Some(info) = state.api_keys.find(token) {
+            return Ok(ClientAccess::Scoped(info.scope));
+        }
+    }
+    Err(GatewayError::new(
+        ErrorKind::AuthError,
+        "API key 缺失或无效",
+    ))
+}
+
+fn scope_denied(provider: &str) -> GatewayError {
+    GatewayError::new(
+        ErrorKind::ScopeDenied,
+        format!("该 API key 无权访问 provider `{provider}`"),
+    )
+}
+
+fn invalid_header_value(name: &str) -> GatewayError {
+    GatewayError::new(
+        ErrorKind::InvalidRequest,
+        format!("请求头 `{name}` 的值不是合法的 HTTP 头"),
+    )
+}
+
+/// 组装要发往上游的请求头：客户端头 →（可选）API 密钥头 → provider 自定义头。
+fn build_forward_headers(
+    state: &AppState,
+    client_headers: &HeaderMap,
+    target: &Target<'_>,
+) -> Result<HeaderMap, GatewayError> {
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in client_headers.iter() {
+        if should_forward_request_header(name.as_str()) {
+            forwarded.insert(name.clone(), value.clone());
+        }
+    }
+    if let Some(reference) = target.api_key {
+        let api_key = match state.credentials.resolve(reference) {
+            Some(credential) => credential.value,
+            None => {
+                return Err(GatewayError::new(
+                    ErrorKind::CredentialNotConfigured,
+                    format!("凭据 `{reference}` 未配置：请在控制台写入，或写进凭据文件"),
+                ));
+            }
+        };
+        match target.api {
+            ApiKind::Anthropic => {
+                let version = target
+                    .api_version
+                    .or_else(|| target.api.default_api_version())
+                    .unwrap_or("2023-06-01");
+                forwarded.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(&api_key)
+                        .map_err(|_| invalid_header_value("x-api-key"))?,
+                );
+                forwarded.insert(
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_str(version)
+                        .map_err(|_| invalid_header_value("anthropic-version"))?,
+                );
+            }
+            _ => {
+                forwarded.insert(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}"))
+                        .map_err(|_| invalid_header_value("authorization"))?,
+                );
+            }
+        }
+    }
+    for (name, source) in target.headers {
+        let header_name =
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid_header_value(name))?;
+        let value = match source {
+            HeaderSource::Literal(value) => value.clone(),
+            HeaderSource::Credential(reference) => match state.credentials.resolve(reference) {
+                Some(credential) => credential.value,
+                None => {
+                    return Err(GatewayError::new(
+                        ErrorKind::CredentialNotConfigured,
+                        format!("请求头 `{name}` 引用的凭据 `{reference}` 未配置"),
+                    ));
+                }
+            },
+        };
+        forwarded.insert(
+            header_name,
+            HeaderValue::from_str(&value).map_err(|_| invalid_header_value(name))?,
+        );
+    }
+    Ok(forwarded)
 }
 
 /// 网关错误 → 统一信封响应。
@@ -432,7 +531,8 @@ fn error_response(err: GatewayError) -> Response {
 struct Target<'a> {
     api: ApiKind,
     base_url: &'a str,
-    api_key: &'a CredentialRef,
+    api_key: Option<&'a CredentialRef>,
+    headers: &'a [(String, HeaderSource)],
     api_version: Option<&'a str>,
     timeout: Duration,
 }

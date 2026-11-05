@@ -7,6 +7,14 @@
 
 ### Added
 
+- provider 级 `headers`：自定义请求头映射，值可为 `credential/<name>` 引用或字面量；
+  转发时最后写入，可覆盖 `Authorization` / `x-api-key` / `anthropic-version`（适配 Cookie 鉴权的上游）。
+- provider 的 `api_key` 改为可选：省略时不注入任何鉴权头，完全由 `headers` 承担。
+- 对外 API key（`crates/core/src/client_key.rs`）：存在同一份 `credentials.yaml` 的 `keys` 段，
+  只存 `sha256` 摘要，明文只在创建 / 轮换时返回一次；每把 key 带 provider `scope`（id 列表或 `*`）。
+- 控制台 API key 接口：`GET|POST /console/api/keys`、`PATCH|DELETE /console/api/keys/{name}`、
+  `POST /console/api/keys/{name}/rotate`；控制台新增「API 密钥」视图。
+- 新增错误类型 `scope_denied`（403）：对外 API key 越权访问 provider。
 - 凭据模块（`crates/core/src/credential.rs`）：配置文件只存 `credential/<name>` 引用，密钥值独立落在
   `credentials.yaml`（默认 `$XDG_CONFIG_HOME/anybridge-litellm/credentials.yaml`，`0600`，原子写盘）。
   `CredentialStore` 是插拔点，本期只有 YAML 文件实现；请求时按操作解析，轮换后下一次请求即生效。
@@ -28,6 +36,8 @@
   定义一处（`binary_name_matches_gateway_name` 兜住改名漂移），版本走 `env!("CARGO_PKG_VERSION")`；
   `scripts/package.py` 从 `cargo metadata` 读包名、二进制名与版本；控制台标题与 h1 取状态接口的 `name`。
 - **破坏性**：`api_key` 只接受 `credential/<name>`，旧的 `os.environ/VAR` 与裸变量名会在加载时报错并提示迁移。
+- **破坏性**：`credentials.yaml` 顶层键 `credentials` 重命名为 `refs`（对齐 dsh）；旧布局加载即报错并提示迁移，不做静默回退。
+- 控制台 provider 表单新增「使用 API 密钥」开关与「自定义请求头」编辑区；详情页展示 API 密钥状态与请求头。
 - 控制台 provider 表单拆成「凭据引用（自动派生、只读）」+「密钥值（只写）」，保存后单独写入凭据文件。
 - 凭据命名约定改为 `upper(provider id)` + `_API_KEY`；示例配置同步为 `credential/OPENAI_API_KEY` 等。
 - 首页概览统计卡移除，内容并入「关于」视图。

@@ -9,15 +9,22 @@
 //! [`CredentialStore`] 是插拔点：以后接 keyring / Vault / 远端配置中心只需新增实现，
 //! 上层（server / console）只依赖 trait。
 //!
-//! 文件格式：
+//! 文件格式（顶层 `refs` 段；对齐 dsh）：
 //!
 //! ```yaml
-//! credentials:
+//! refs:
 //!   wpsai: sk-...
 //!   openai: sk-...
+//! keys:            # 对外 API key（见 client_key 模块）
+//!   - name: alice
+//!     hash: 9f2c...
+//!     scope: ["*"]
+//!     created_at: 2026-11-05T12:00:00Z
+//!     enabled: true
 //! ```
 //!
 //! 空值等价于「未配置」（与 dsh 的 credential seam 同一条规则）。
+//! 旧布局（顶层 `credentials:`）在读取时报错并提示迁移，不做静默回退。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -29,6 +36,15 @@ use crate::config::ConfigErrors;
 
 /// 引用前缀。配置里写成 `credential/<name>`。
 pub const PREFIX: &str = "credential/";
+
+/// 上游凭据引用所在的顶层段。
+pub const REFS_SECTION: &str = "refs";
+
+/// 对外 API key 所在的顶层段。
+pub const KEYS_SECTION: &str = "keys";
+
+/// 旧布局的顶层键；读取时提示迁移。
+const LEGACY_SECTION: &str = "credentials";
 
 /// 凭据名长度上限（字节）。
 const MAX_NAME_BYTES: usize = 64;
@@ -164,7 +180,7 @@ pub trait CredentialStore: Send + Sync {
     }
 }
 
-/// YAML 文件存储：`credentials.yaml` 里的 `credentials` 映射。
+/// YAML 文件存储：`credentials.yaml` 里的 `refs` 映射。
 ///
 /// 每次 `resolve` 都重新读盘（文件只有几 KB），因此外部手工编辑与控制器写入
 /// 都立刻可见，不需要重启也不需要失效缓存。`path = None` 表示只读模式。
@@ -186,34 +202,13 @@ impl YamlCredentialStore {
         self.path.as_deref()
     }
 
-    /// 读取 `credentials` 映射；文件不存在或为空时视为空映射。
+    /// 读取 `refs` 映射；文件不存在或为空时视为空映射。
     fn read(&self) -> Result<Mapping, CredentialError> {
         let Some(path) = &self.path else {
             return Ok(Mapping::new());
         };
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Mapping::new()),
-            Err(err) => {
-                return Err(CredentialError::Io(format!(
-                    "读取凭据文件 {} 失败：{err}",
-                    path.display()
-                )));
-            }
-        };
-        if text.trim().is_empty() {
-            return Ok(Mapping::new());
-        }
-        let value: Value = serde_yaml::from_str(&text).map_err(|err| {
-            CredentialError::Io(format!("解析凭据文件 {} 失败：{err}", path.display()))
-        })?;
-        match value.get("credentials") {
-            None | Some(Value::Null) => Ok(Mapping::new()),
-            Some(Value::Mapping(mapping)) => Ok(mapping.clone()),
-            Some(_) => Err(CredentialError::Invalid(
-                "凭据文件的顶层 `credentials` 必须是映射".into(),
-            )),
-        }
+        let root = read_root(path)?;
+        extract_section(&root, REFS_SECTION, path)
     }
 
     fn lookup(&self, reference: &CredentialRef) -> Option<String> {
@@ -228,17 +223,73 @@ impl YamlCredentialStore {
 
     fn write(&self, mapping: &Mapping) -> Result<(), CredentialError> {
         let path = self.path.as_ref().ok_or(CredentialError::ReadOnly)?;
-        let mut root = Mapping::new();
+        let mut root = read_root(path)?;
         root.insert(
-            Value::String("credentials".into()),
+            Value::String(REFS_SECTION.into()),
             Value::Mapping(mapping.clone()),
         );
-        let yaml = serde_yaml::to_string(&Value::Mapping(root))
-            .map_err(|err| CredentialError::Io(format!("序列化凭据失败：{err}")))?;
-        write_atomic(path, &yaml).map_err(|err| {
-            CredentialError::Io(format!("写入凭据文件 {} 失败：{err}", path.display()))
-        })
+        write_root(path, &root)
     }
+}
+
+/// 读取整份凭据文档；文件不存在或为空时视为空映射。
+pub(crate) fn read_root(path: &Path) -> Result<Mapping, CredentialError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Mapping::new()),
+        Err(err) => {
+            return Err(CredentialError::Io(format!(
+                "读取凭据文件 {} 失败：{err}",
+                path.display()
+            )));
+        }
+    };
+    if text.trim().is_empty() {
+        return Ok(Mapping::new());
+    }
+    let value: Value = serde_yaml::from_str(&text).map_err(|err| {
+        CredentialError::Io(format!("解析凭据文件 {} 失败：{err}", path.display()))
+    })?;
+    match value {
+        Value::Null => Ok(Mapping::new()),
+        Value::Mapping(mapping) => Ok(mapping),
+        _ => Err(CredentialError::Invalid("凭据文件的顶层必须是映射".into())),
+    }
+}
+
+/// 取一个顶层段。段缺失/为空 → 空映射；非映射 → 错误。
+///
+/// 读取 `refs` 时若只看到旧布局的顶层 `credentials`，报错并提示迁移：
+/// 键名是安全的，值永远不出现在错误消息里。
+pub(crate) fn extract_section(
+    root: &Mapping,
+    section: &str,
+    path: &Path,
+) -> Result<Mapping, CredentialError> {
+    if section == REFS_SECTION
+        && !root.contains_key(REFS_SECTION)
+        && root.contains_key(LEGACY_SECTION)
+    {
+        return Err(CredentialError::Invalid(format!(
+            "凭据文件 {} 使用旧布局（顶层 `{LEGACY_SECTION}`）：请把条目嵌套到 `{REFS_SECTION}:` 映射下，值不变",
+            path.display()
+        )));
+    }
+    match root.get(section) {
+        None | Some(Value::Null) => Ok(Mapping::new()),
+        Some(Value::Mapping(mapping)) => Ok(mapping.clone()),
+        Some(_) => Err(CredentialError::Invalid(format!(
+            "凭据文件的顶层 `{section}` 必须是映射"
+        ))),
+    }
+}
+
+/// 原子写回整份凭据文档（保留调用方未触碰的其它顶层段）。
+pub(crate) fn write_root(path: &Path, root: &Mapping) -> Result<(), CredentialError> {
+    let yaml = serde_yaml::to_string(&Value::Mapping(root.clone()))
+        .map_err(|err| CredentialError::Io(format!("序列化凭据失败：{err}")))?;
+    write_atomic(path, &yaml)
+        .map_err(|err| CredentialError::Io(format!("写入凭据文件 {} 失败：{err}", path.display())))
 }
 
 impl CredentialStore for YamlCredentialStore {
@@ -462,11 +513,44 @@ mod tests {
     fn empty_value_counts_as_unconfigured() {
         let dir = temp_dir("empty");
         let path = dir.join("credentials.yaml");
-        std::fs::write(&path, "credentials:\n  wpsai: \"\"\n").unwrap();
+        std::fs::write(&path, "refs:\n  wpsai: \"\"\n").unwrap();
         let store = YamlCredentialStore::new(Some(path));
         let reference = CredentialRef::parse_at("credential/wpsai", "p").unwrap();
         assert!(store.resolve(&reference).is_none(), "空值视为未配置");
         assert!(!store.describe(&reference).configured);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_credentials_key_is_rejected_with_migration_hint() {
+        let dir = temp_dir("legacy");
+        let path = dir.join("credentials.yaml");
+        std::fs::write(&path, "credentials:\n  wpsai: sk-secret-value\n").unwrap();
+        let store = YamlCredentialStore::new(Some(path));
+        let err = store.read().unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("refs"), "{rendered}");
+        assert!(rendered.contains("旧布局"), "{rendered}");
+        assert!(
+            !rendered.contains("sk-secret-value"),
+            "错误消息不能泄露值：{rendered}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn writing_refs_preserves_the_keys_section() {
+        let dir = temp_dir("sections");
+        let path = dir.join("credentials.yaml");
+        std::fs::write(&path, "refs:\n  wpsai: sk-a\nkeys:\n  - name: alice\n").unwrap();
+        let store = YamlCredentialStore::new(Some(path.clone()));
+        let reference = CredentialRef::parse_at("credential/wpsai", "p").unwrap();
+        store.set(&reference, "sk-b").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("keys:"), "{written}");
+        assert!(written.contains("name: alice"), "{written}");
+        assert!(written.contains("sk-b"), "{written}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

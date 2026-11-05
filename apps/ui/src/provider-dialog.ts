@@ -28,6 +28,7 @@ import {
   type ModelDraft,
   type ProviderDraft,
   type ProviderEntry,
+  type ProviderHeader,
   type UpstreamModel,
 } from "./api";
 import { collectValues, modalBackdrop, renderFieldGroups } from "./form";
@@ -148,13 +149,93 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
 
   const credentialHint = el("p", "m-0 text-xs leading-relaxed text-subtle", "");
 
+  // 「使用 API 密钥」开关：关闭时提交 `api_key: ""`，由自定义请求头鉴权。
+  let useApiKey = current?.api_key !== null;
+  const apiKeyToggle = el("input", "toggle toggle-sm");
+  apiKeyToggle.type = "checkbox";
+  apiKeyToggle.id = "provider-use-api-key";
+  apiKeyToggle.checked = useApiKey;
+  const apiKeyControl = el("div", "flex flex-col gap-2");
+  const apiKeyToggleRow = el("label", "flex items-center gap-2 text-xs text-muted");
+  apiKeyToggleRow.append(apiKeyToggle, document.createTextNode("使用 API 密钥"));
+  apiKeyControl.append(apiKeyToggleRow, secretInput);
+  const apiKeyField = field("API 密钥", apiKeyControl, "");
+
+  // 自定义请求头：有序行（名称 + 值），值可为 `credential/<name>` 引用。
+  const headersSection = el("section", "flex flex-col gap-2");
+  headersSection.append(
+    el("span", "text-xs font-medium text-base-content", "自定义请求头"),
+    el(
+      "p",
+      "m-0 text-xs leading-relaxed text-subtle",
+      "值以 credential/<name> 开头时从凭据文件解析（适合 Cookie 等机密），否则按字面量发送。",
+    ),
+  );
+  const headerRows = el("div", "flex flex-col gap-1.5");
+  const addHeader = el("button", "btn btn-xs btn-ghost self-start", "+ 添加请求头");
+  addHeader.type = "button";
+  headersSection.append(headerRows, addHeader);
+
+  let headerDrafts: ProviderHeader[] = (current?.headers ?? []).map((header) => ({
+    name: header.name,
+    value: header.value,
+  }));
+
+  function renderHeaders(): void {
+    headerRows.textContent = "";
+    headerDrafts.forEach((header, index) => {
+      const row = el("div", "flex items-center gap-1.5");
+      const name = el("input", "input input-sm w-40 shrink-0 font-mono");
+      name.placeholder = "Header-Name";
+      name.value = header.name;
+      name.setAttribute("aria-label", `请求头 ${index + 1} 名称`);
+      name.addEventListener("input", () => {
+        headerDrafts[index].name = name.value;
+      });
+      const value = el("input", "input input-sm w-full font-mono");
+      value.placeholder = "credential/WPS_SID 或字面量";
+      value.value = header.value;
+      value.setAttribute("aria-label", `请求头 ${index + 1} 的值`);
+      value.addEventListener("input", () => {
+        headerDrafts[index].value = value.value;
+      });
+      row.append(
+        name,
+        value,
+        iconButton(
+          "trash",
+          `移除请求头 ${index + 1}`,
+          () => {
+            headerDrafts.splice(index, 1);
+            renderHeaders();
+          },
+          "text-error",
+        ),
+      );
+      headerRows.append(row);
+    });
+  }
+
+  function collectHeaders(): ProviderHeader[] {
+    return headerDrafts
+      .map((header) => ({ name: header.name.trim(), value: header.value.trim() }))
+      .filter((header) => header.name !== "" && header.value !== "");
+  }
+
+  addHeader.addEventListener("click", () => {
+    headerDrafts = [...headerDrafts, { name: "", value: "" }];
+    renderHeaders();
+  });
+  renderHeaders();
+
   panel.append(
     field("Provider ID", idInput, "以小写字母开头的标识，在请求中唯一标识该提供商，并用于派生凭据名。"),
     field("显示名称", displayNameInput),
     field("API 地址", baseUrlInput),
     field("API 协议", apiSelect),
-    field("API 密钥", secretInput),
+    apiKeyField,
     credentialHint,
+    headersSection,
   );
 
   // ---- 模型目录 ----
@@ -231,6 +312,11 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
   }
 
   function syncCredentialHint(): void {
+    if (!apiKeyToggle.checked) {
+      credentialHint.textContent =
+        "未使用 API 密钥：请通过「自定义请求头」完成鉴权（例如 Cookie: credential/WPS_SID）。";
+      return;
+    }
     const name = credentialNameFor(idInput.value);
     const reference = `credential/${name}`;
     credentialHint.textContent =
@@ -238,6 +324,12 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
         ? `当前凭据已配置（${reference}，源：${current.api_key.source ?? "file"}）；留空表示不修改`
         : `配置里只写引用 ${reference}；值写入独立的凭据文件（0600），保存后不再回显`;
   }
+
+  secretInput.hidden = !useApiKey;
+  apiKeyToggle.addEventListener("change", () => {
+    secretInput.hidden = !apiKeyToggle.checked;
+    syncCredentialHint();
+  });
 
   // ---- 目录行：icon 按钮 + 手风琴 ----
   let openIndex: number | null = null;
@@ -584,7 +676,8 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
           : await probeUpstreamModels({
               base_url: baseUrlInput.value.trim(),
               api: apiSelect.value,
-              api_key: secretInput.value,
+              api_key: apiKeyToggle.checked ? secretInput.value.trim() : "",
+              headers: collectHeaders(),
             });
         if (result.kind === "error") {
           error.textContent = result.message;
@@ -661,6 +754,9 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
             displayNameInput.value.trim() === "" ? undefined : displayNameInput.value.trim(),
           api: apiSelect.value,
           base_url: baseUrl,
+          // 关闭开关 = 明确「不使用 API 密钥」，服务端会删除该键。
+          api_key: apiKeyToggle.checked ? undefined : "",
+          headers: collectHeaders(),
         };
         const saved =
           current === null
@@ -672,7 +768,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
           return;
         }
 
-        const secret = secretInput.value.trim();
+        const secret = apiKeyToggle.checked ? secretInput.value.trim() : "";
         if (secret !== "") {
           const credential = await setCredential(credentialNameFor(id), secret);
           if (credential.kind !== "ok") {

@@ -45,3 +45,12 @@ providers:
     timeout: 300
     models:
       - id: qwen3:8b
+  cookie-auth:                         # 通过 Cookie 鉴权的上游：不配 api_key，改由 headers 承担
+    api: completions
+    base_url: https://gateway.example/codeplan/v1
+    headers:
+      Cookie: credential/WPS_SID       # 以 credential/ 开头 → 按请求从凭据文件解析
+      X-Tenant-Id: acme               # 其余按字面量发送
+    timeout: 600
+    models:
+      - id: deepseek-v4

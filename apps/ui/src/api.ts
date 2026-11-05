@@ -61,6 +61,26 @@ export interface CredentialState {
   writable: boolean;
 }
 
+/**
+ * provider 级自定义请求头。`value` 以 `credential/` 开头时是凭据引用，
+ * 否则按字面量发送；`credential` 由服务端回填（写请求可省略）。
+ */
+export interface ProviderHeader {
+  name: string;
+  value: string;
+  credential?: boolean;
+}
+
+/** 对外 API key 的元信息；永远不含明文与摘要。 */
+export interface ApiKeyEntry {
+  name: string;
+  /** provider id 列表；`["*"]` 表示全部。 */
+  scope: string[];
+  description?: string | null;
+  created_at: string;
+  enabled: boolean;
+}
+
 export interface ProviderEntry {
   /** provider id（配置键、路径段）。 */
   name: string;
@@ -72,7 +92,9 @@ export interface ProviderEntry {
   timeout?: number;
   /** 服务端 `None` 会序列化成 `null`，两者都要容忍。 */
   api_version?: string | null;
-  api_key?: ApiKeyInfo;
+  /** 未配置 API 密钥（靠自定义请求头鉴权）时为 `null`。 */
+  api_key?: ApiKeyInfo | null;
+  headers?: ProviderHeader[];
   models?: ModelEntry[];
 }
 
@@ -88,6 +110,8 @@ export interface ConsoleState {
   /** 凭据文件路径；只读模式下为 null。 */
   credentials_file?: string | null;
   providers?: ProviderEntry[];
+  /** 对外 API key 元信息（不含明文/摘要）。 */
+  keys?: ApiKeyEntry[];
 }
 
 /** 写接口载荷。`undefined` 字段会被 JSON 序列化丢弃。 */
@@ -99,8 +123,10 @@ export interface ProviderDraft {
   /** 凭据引用；服务端按 `upper(id)_API_KEY` 派生，这里传了也只会被校验语法。 */
   api: string;
   base_url: string;
-  /** 只接受 `os.environ/VAR`；空表示更新时保留原值。 */
+  /** `""` 表示不使用 API 密钥（靠 headers 鉴权）；缺省表示按 id 派生。 */
   api_key?: string;
+  /** 自定义请求头；值可为 `credential/<name>` 引用或字面量。 */
+  headers?: ProviderHeader[];
   timeout?: number;
   api_version?: string;
 }
@@ -393,7 +419,9 @@ export async function probeUpstreamModels(probe: {
     base_url: string;
     api: string;
     api_version?: string;
-    api_key: string;
+    /** 空/缺省表示不使用 API 密钥（靠 headers 鉴权）。 */
+    api_key?: string;
+    headers?: ProviderHeader[];
   },
 ): Promise<UpstreamModelsResult> {
   return postUpstreamModels("/console/api/upstream-models", probe);
@@ -438,6 +466,106 @@ export async function deleteCredential(
   name: string,
 ): Promise<MutationResult> {
   return mutate("DELETE", `${CREDENTIALS_ENDPOINT}/${encodeURIComponent(name)}`);
+}
+
+// ---- 对外 API key ----
+
+/** 对外 API key 集合路径。 */
+export const KEYS_ENDPOINT = "/console/api/keys";
+
+/** 写结果：`secret` 只在创建/轮换的响应里出现一次。 */
+export type ApiKeyMutationResult =
+  | { kind: "ok"; key: ApiKeyEntry; secret?: string }
+  | { kind: "error"; message: string }
+  | { kind: "unauthorized" };
+
+export type ApiKeyDeleteResult =
+  | { kind: "ok" }
+  | { kind: "error"; message: string }
+  | { kind: "unauthorized" };
+
+async function mutateKey(
+  method: "POST" | "PATCH",
+  path: string,
+  body?: unknown,
+): Promise<ApiKeyMutationResult> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    return { kind: "error", message: `无法连接网关：${detail}` };
+  }
+  if (response.status === 401) {
+    return { kind: "unauthorized" };
+  }
+  const payload = await readJson(response);
+  if (response.status !== 200) {
+    return { kind: "error", message: extractErrorMessage(payload, response.status) };
+  }
+  if (!isObject(payload) || !isObject(payload.key)) {
+    return { kind: "error", message: "响应格式不正确：期望 { key }" };
+  }
+  return {
+    kind: "ok",
+    key: payload.key as unknown as ApiKeyEntry,
+    secret: typeof payload.secret === "string" ? payload.secret : undefined,
+  };
+}
+
+export interface ApiKeyDraft {
+  name?: string;
+  scope: string[];
+  description?: string;
+  enabled: boolean;
+}
+
+export async function createKey(draft: ApiKeyDraft): Promise<ApiKeyMutationResult> {
+  return mutateKey("POST", KEYS_ENDPOINT, draft);
+}
+
+export async function updateKey(
+  name: string,
+  draft: Omit<ApiKeyDraft, "name">,
+): Promise<ApiKeyMutationResult> {
+  return mutateKey("PATCH", `${KEYS_ENDPOINT}/${encodeURIComponent(name)}`, draft);
+}
+
+export async function rotateKey(name: string): Promise<ApiKeyMutationResult> {
+  return mutateKey("POST", `${KEYS_ENDPOINT}/${encodeURIComponent(name)}/rotate`);
+}
+
+export async function deleteKey(name: string): Promise<ApiKeyDeleteResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${KEYS_ENDPOINT}/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    return { kind: "error", message: `无法连接网关：${detail}` };
+  }
+  if (response.status === 401) {
+    return { kind: "unauthorized" };
+  }
+  if (response.status !== 200) {
+    const payload = await readJson(response);
+    return { kind: "error", message: extractErrorMessage(payload, response.status) };
+  }
+  return { kind: "ok" };
 }
 
 export function providerPath(name: string): string {

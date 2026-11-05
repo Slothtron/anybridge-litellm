@@ -67,7 +67,7 @@ fn credentials_path(dir: &Path) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            "credentials:\n  OPENAI_API_KEY: {KEY_VALUE}\n  ANTHROPIC_API_KEY: {KEY_VALUE}\n  {KEY_NAME}: {KEY_VALUE}\n  HOT_API_KEY: {KEY_VALUE}\n"
+            "refs:\n  OPENAI_API_KEY: {KEY_VALUE}\n  ANTHROPIC_API_KEY: {KEY_VALUE}\n  {KEY_NAME}: {KEY_VALUE}\n  HOT_API_KEY: {KEY_VALUE}\n"
         ),
     )
     .unwrap();
@@ -1057,7 +1057,7 @@ async fn upstream_models_can_be_imported_selectively() {
         ),
     )
     .unwrap();
-    std::fs::write(&credentials, "credentials:\n  FAKE_API_KEY: sk-fake\n").unwrap();
+    std::fs::write(&credentials, "refs:\n  FAKE_API_KEY: sk-fake\n").unwrap();
     let loaded = load_from_str(
         &std::fs::read_to_string(&config).unwrap(),
         &Default::default(),
@@ -1452,6 +1452,311 @@ async fn session_cookie_survives_a_restart() {
         let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "会话密钥必须 0600");
     }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Provider 自定义请求头 / 对外 API key ----
+
+/// 假上游：回显收到的请求头，便于断言转发结果。
+async fn echo_headers_handler(headers: axum::http::HeaderMap) -> axum::Json<Value> {
+    let map: serde_json::Map<String, Value> = headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                Value::String(value.to_str().unwrap_or("").to_string()),
+            )
+        })
+        .collect();
+    axum::Json(Value::Object(map))
+}
+
+async fn upstream_requires_cookie(headers: axum::http::HeaderMap) -> Response {
+    if headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "wps_sid=secret")
+    {
+        axum::Json(json!({"object": "list", "data": [{"id": "cookie-model"}]})).into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing cookie").into_response()
+    }
+}
+
+fn write_config(dir: &Path, body: &str) -> (PathBuf, PathBuf) {
+    let config = dir.join("config.yaml");
+    let credentials = dir.join("credentials.yaml");
+    std::fs::write(&config, body).unwrap();
+    std::fs::write(&credentials, "refs:\n  COOKIE_VALUE: wps_sid=secret\n").unwrap();
+    (config, credentials)
+}
+
+#[tokio::test]
+async fn provider_headers_are_forwarded_and_api_key_is_optional() {
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(echo_headers_handler),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    // 没有 api_key，靠 headers 里的 Cookie（凭据引用）与字面量头鉴权。
+    let dir = temp_dir("headers");
+    let (config, credentials) = write_config(
+        &dir,
+        &format!(
+            "auth:\n  master_key: {MASTER_KEY}\nproviders:\n  cookie:\n    api: completions\n    base_url: http://{addr}/v1\n    headers:\n      Cookie: credential/COOKIE_VALUE\n      X-Tenant-Id: acme\n    models:\n      - id: cookie-model\n"
+        ),
+    );
+    let loaded = load_from_str(
+        &std::fs::read_to_string(&config).unwrap(),
+        &Default::default(),
+    )
+    .unwrap()
+    .config;
+    let app = build_router(AppState::with_token_and_path(
+        loaded,
+        CONSOLE_TOKEN.to_string(),
+        Some(config),
+        None,
+        Some(credentials),
+    ));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/llmproxy/cookie/v1/chat/completions")
+                .header("host", HOST)
+                .header("authorization", format!("Bearer {MASTER_KEY}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"cookie-model","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let echoed = json_body(response).await;
+    assert_eq!(echoed["cookie"], "wps_sid=secret", "凭据引用应解析成值");
+    assert_eq!(echoed["x-tenant-id"], "acme", "字面量头原样发送");
+    assert!(
+        echoed.get("authorization").is_none(),
+        "没有 api_key 时不注入 Authorization：{echoed}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn console_provider_can_drop_api_key_and_expose_headers() {
+    let dir = temp_dir("headers-state");
+    let (app, path) = writable_app(&dir);
+
+    let response = console(
+        &app,
+        "POST",
+        "/console/api/providers",
+        Some(CONSOLE_TOKEN),
+        Some(
+            &json!({
+                "name": "cookie",
+                "api": "completions",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "api_key": "",
+                "headers": [
+                    {"name": "Cookie", "value": "credential/COOKIE_VALUE"},
+                    {"name": "X-Tenant-Id", "value": "acme"}
+                ]
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state = json_body(response).await;
+    let provider = state["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["name"] == "cookie")
+        .unwrap();
+    assert!(
+        provider["api_key"].is_null(),
+        "api_key 应被删除：{provider}"
+    );
+    assert_eq!(provider["headers"][0]["name"], "Cookie");
+    assert_eq!(provider["headers"][0]["value"], "credential/COOKIE_VALUE");
+    assert_eq!(provider["headers"][0]["credential"], true);
+    assert_eq!(provider["headers"][1]["credential"], false);
+
+    let written = std::fs::read_to_string(&path).unwrap();
+    let cookie_block = written
+        .split("cookie:")
+        .nth(1)
+        .expect("应写入 cookie provider");
+    assert!(
+        !cookie_block.contains("api_key:"),
+        "不应为该 provider 写入 api_key：{written}"
+    );
+    assert!(written.contains("X-Tenant-Id: acme"), "{written}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn probe_upstream_models_sends_custom_headers_without_api_key() {
+    let upstream = Router::new().route("/v1/models", axum::routing::get(upstream_requires_cookie));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let dir = temp_dir("probe-headers");
+    let (app, _) = writable_app(&dir);
+    let response = console(
+        &app,
+        "POST",
+        "/console/api/upstream-models",
+        Some(CONSOLE_TOKEN),
+        Some(
+            &json!({
+                "base_url": format!("http://{addr}/v1"),
+                "api": "completions",
+                "headers": [{"name": "Cookie", "value": "wps_sid=secret"}]
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["models"][0]["id"], "cookie-model");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+async fn proxy_models(app: &Router, provider: &str, key: &str) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/llmproxy/{provider}/v1/models"))
+                .header("host", HOST)
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn client_keys_enforce_provider_scope() {
+    let dir = temp_dir("client-keys");
+    let (app, _) = writable_app(&dir);
+
+    // 新建一把只允许 openai 的 key。
+    let response = console(
+        &app,
+        "POST",
+        "/console/api/keys",
+        Some(CONSOLE_TOKEN),
+        Some(&json!({"name": "alice", "scope": ["openai"], "description": "Alice"}).to_string()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let created = json_body(response).await;
+    let secret = created["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("ab-"), "{secret}");
+    assert!(created["key"].get("hash").is_none(), "响应不含摘要");
+    assert!(
+        created["key"].get("secret").is_none(),
+        "摘要只在顶层返回一次"
+    );
+
+    // scope 命中 → 200；越权 → 403 scope_denied。
+    let ok = proxy_models(&app, "openai", &secret).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let denied = proxy_models(&app, "anthropic", &secret).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let detail = json_body(denied).await;
+    assert_eq!(detail["error"]["type"], "scope_denied");
+
+    // master key 不受 scope 限制。
+    let master = proxy_models(&app, "anthropic", MASTER_KEY).await;
+    assert_eq!(master.status(), StatusCode::OK);
+
+    // 未知 key → 401。
+    assert_eq!(
+        proxy_models(&app, "openai", "ab-nope").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 轮换后旧值失效、新值可用。
+    let response = console(
+        &app,
+        "POST",
+        "/console/api/keys/alice/rotate",
+        Some(CONSOLE_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let rotated = json_body(response).await;
+    let rotated_secret = rotated["secret"].as_str().unwrap().to_string();
+    assert_ne!(rotated_secret, secret);
+    assert_eq!(
+        proxy_models(&app, "openai", &secret).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        proxy_models(&app, "openai", &rotated_secret).await.status(),
+        StatusCode::OK
+    );
+
+    // 改 scope 为全部 → 两个 provider 都通过。
+    let response = console(
+        &app,
+        "PATCH",
+        "/console/api/keys/alice",
+        Some(CONSOLE_TOKEN),
+        Some(&json!({"scope": ["*"]}).to_string()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        proxy_models(&app, "anthropic", &rotated_secret)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    // 列表只有元信息；删除后立刻 401。
+    let response = console(&app, "GET", "/console/api/keys", Some(CONSOLE_TOKEN), None).await;
+    let listed = json_body(response).await;
+    assert_eq!(listed["keys"][0]["name"], "alice");
+    assert!(listed["keys"][0].get("hash").is_none());
+    assert!(listed["keys"][0].get("secret").is_none());
+
+    let response = console(
+        &app,
+        "DELETE",
+        "/console/api/keys/alice",
+        Some(CONSOLE_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        proxy_models(&app, "openai", &rotated_secret).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

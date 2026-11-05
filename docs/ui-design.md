@@ -62,7 +62,8 @@
 | 行内删除 | 图标按钮（trash SVG，`btn-ghost text-error` + `aria-label`），危险确认才用 `btn-error` |
 | 图标按钮 | Heroicons outline 内联 SVG（`icons.ts`），只用 `currentColor`；一律带 `aria-label`，不用 emoji |
 | 复制 | clipboard 图标按钮，成功后短暂切 check + title「已复制」 |
-| 路由 | hash 路由：`#/` 列表、`#/provider/{id}` 详情、`#/about` 关于；首页卡片只做入口（stretched-link 整卡可点） |
+| 路由 | hash 路由：`#/` 列表、`#/provider/{id}` 详情、`#/keys` API 密钥、`#/about` 关于；首页卡片只做入口（stretched-link 整卡可点） |
+| 一次性密钥 | 创建 / 轮换对外 API key 后弹 `modal` 展示明文，等宽 + 复制图标；关闭后不可再查看 |
 | 焦点 | `input` / `select` 的 `--input-color` 指向 `--color-primary`，不跟 daisyUI 默认近黑色 |
 | 宽表格 | `min-w-[760px]` + 外层 `overflow-x-auto`，窄视口横向滚动而不是把 id 挤成竖排 |
 | 输入行高 | `.input` 的 `line-height` 等于控件高度，避免下划线被行盒裁掉 |
@@ -131,3 +132,4 @@ cd apps/ui && npm run dev -- --host 127.0.0.1
 | 2026-11-05 | v1.2 落地：移除新增对话框的预设/tab（单列表单）；「获取可用模型」改弹窗勾选导入，上游标准字段（context_window / max_output_tokens / input_modalities / reasoning，含别名）自动预填；目录行 icon 按钮 + 手风琴就地配置模型；行内删除与复制改图标按钮；首页卡片瘦身为入口（展示完整接入地址 `http://{bind}{base_path}`），新增 `#/provider/{id}` hash 路由详情页承接元信息与模型表 |
 | 2026-11-05 | v1.3 落地：详情卡精简为单列（接入地址 / base_url / timeout），移除 base_path、api_key、api_version 与来源；模型表与编辑弹窗目录支持勾选 + 批量删除；思考档位列去掉 `reasoning_effort` 参数名（只留档位徽章）；模型表单「推理等级」改为开关，开启后才展示档位行编辑（增删行）与默认档位 |
 | 2026-11-05 | v1.4 落地：移除 `default_thinking_level`（默认思考档位属于客户端自己的配置）——配置 schema、`/models` 的 `extra.reasoning.default`、控制台 API 与模型表单同步去掉 |
+| 2026-11-05 | v1.5 落地：provider 表单增加「使用 API 密钥」开关与「自定义请求头」有序行（值支持 `credential/<name>` 引用）；详情页展示 API 密钥状态与请求头；新增 `#/keys` 视图管理对外 API key（列表 / 新建 / 改 scope / 启停 / 轮换 / 删除），明文只在创建 / 轮换后一次性展示 |

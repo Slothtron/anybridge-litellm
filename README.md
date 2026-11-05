@@ -117,7 +117,8 @@ providers:
 | `api` | 是 | 协议声明，取值仅 `completions` / `anthropic` / `responses` |
 | `name` | 否 | provider 展示名；为空时界面回退显示 provider id |
 | `base_url` | 是 | 该协议的版本根，`{tail}` 原样拼在其后 |
-| `api_key` | 是 | 上游凭据**引用**；控制台按 `upper(provider id)` + `_API_KEY` 派生（`openai-responses` → `credential/OPENAI_RESPONSES_API_KEY`），值写在凭据文件里 |
+| `api_key` | 否 | 上游凭据**引用**；缺省时按 `upper(provider id)` + `_API_KEY` 派生（`openai-responses` → `credential/OPENAI_RESPONSES_API_KEY`）；空串/省略表示不使用 API 密钥（由 `headers` 鉴权） |
+| `headers` | 否 | 自定义请求头映射；值为 `credential/<name>` 时按请求从凭据文件解析，其余按字面量发送（如 `Cookie: credential/WPS_SID`） |
 | `api_version` | 否 | 仅 `completions` / `responses` 使用（Azure 场景）；`anthropic` 的版本头缺省 `2023-06-01` |
 | `timeout` | 否 | 上游超时（秒），同时用作首字节与整体空闲超时 |
 | `models` | 是 | 模型列表，见下 |
@@ -166,6 +167,8 @@ providers:
 ### 其它规则
 
 - `api_key` 是 `credential/<name>` 引用，值由凭据存储按请求解析；`master_key` 支持字面量与 `os.environ/VAR`。
+- `api_key` 可省略：省略时不注入任何鉴权头，由 `headers` 承担（例如 Cookie 鉴权的上游）。
+- `headers` 的值以 `credential/` 开头时按引用解析，其余按字面量发送；自定义头最后写入，可覆盖同名的 `Authorization` / `x-api-key` / `anthropic-version`。
 - 旧写法（`api_key: os.environ/VAR` 或裸变量名）会在加载时报错并提示迁移到 `credential/<name>`。
 - 未知键默认 warn 并忽略；`--strict-config` 下启动失败。
 - 非法配置启动即失败，并报出字段路径。
@@ -183,6 +186,11 @@ providers:
 | `/console/api/providers` | POST | 新建 provider |
 | `/console/api/providers/{provider}` | PATCH / DELETE | 更新 / 删除 provider |
 | `/console/api/providers/{provider}/models` | POST / PATCH / DELETE | 新建 / 更新（可改 id）/ 删除模型，删除时用 `?model=<id>` |
+| `/console/api/credentials` | GET | 上游凭据列表（只有名字与状态） |
+| `/console/api/credentials/{name}` | PUT / DELETE | 写入 / 轮换 / 删除上游凭据 |
+| `/console/api/keys` | GET / POST | 对外 API key 列表 / 新建（明文只返回一次） |
+| `/console/api/keys/{name}` | PATCH / DELETE | 改 scope、说明、启停 / 删除 |
+| `/console/api/keys/{name}/rotate` | POST | 轮换明文（旧值立刻失效） |
 | `/health` | GET | `{ok, version, providers[]}` |
 | `/` | GET | `{name, version, providers:[{name, api, base_path}]}`，`base_path` 形如 `/llmproxy/openai/v1` |
 
@@ -258,7 +266,8 @@ providers:
 
 | 场景 | type | status |
 |---|---|---|
-| 缺 / 错 master key | `auth_error` | 401 |
+| 缺 / 错 master key 或对外 API key | `auth_error` | 401 |
+| 对外 API key 的 scope 不含请求的 provider | `scope_denied` | 403 |
 | 未知 provider | `provider_not_found` | 404 |
 | 缺前缀 / 缺 provider 的 `/v1/*`、`/llmproxy/v1/*` | `provider_required` | 404 |
 | `{tail}` 不在该 provider 的 `api` 白名单内 | `api_mismatch` | 404 |
@@ -333,7 +342,7 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
 
 编译期内嵌的单页控制台，挂在 `/console/`，是**配置编辑器**（Provider 与模型的增删改）：
 
-- 两个视图：**Provider**（配置编辑）与**关于**（版本、端口、路径、provider/模型数量、只读状态），顶部导航切换，切视图不刷新页面。
+- 三个视图：**Provider**（配置编辑）、**API 密钥**（对外 key 与 scope）、**关于**（版本、端口、路径、provider/模型数量、只读状态），顶部导航切换，切视图不刷新页面。
 - 启动时生成 32 位随机 **launch token**，只打印一次：`console: http://127.0.0.1:4000/console/?token=<token>`。
 - launch token 只做**一次性交换**：`GET /console/?token=<token>` 校验通过后 `303 → ./` 并下发
   `Set-Cookie: anybridge-console=<secret>; HttpOnly; SameSite=Strict; Path=/`（会话级，关浏览器失效）。
@@ -353,6 +362,7 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
   写进凭据文件（`0600`，原子写盘）后立刻生效；配置响应里只有
   `{"kind":"credential","name":..,"configured":true,"source":"file","writable":true}`，永远不含值。
 - 凭据未配置时，转发请求返回 `502 credential_not_configured`，不会带着空 key 打上游。
+- **对外 API key** 存在同一份凭据文件的 `keys` 段（只存 `sha256` 摘要）：控制台可新建 / 改 scope / 启停 / 轮换 / 删除；明文只在创建 / 轮换的响应当中返回一次。调用方用 `Authorization: Bearer <key>`（或 `x-api-key`）访问 `/llmproxy/*`；scope 为 provider id 列表或 `*`，越权返回 `403 scope_denied`。`master_key` 不受 scope 限制。
 - **Provider 对话框**（版式参考 DSH Web 的「自定义模型 API」）：单列表单 + 顶部两个 tab。
   「第三方模型提供商」是预设（OpenAI / Anthropic / OpenAI Responses / 本地 Ollama），选中即填地址与协议；
   「自定义模型 API」填 Provider ID、显示名、API 地址、协议、API 密钥。
@@ -374,8 +384,9 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
 
 - 配置文件里只出现**引用** `credential/<name>`；`<name>` 匹配 `^[A-Za-z_][A-Za-z0-9_]*$`，最长 64 字节。
 - 值由 `CredentialStore` 提供，**每次请求重新解析一次**（`resolve`），所以控制台轮换密钥后下一次请求就生效，不用重启。
-- 本期实现只有 `YamlCredentialStore`：`credentials.yaml` 里的 `credentials` 映射，权限 `0600`，
+- 本期实现只有 `YamlCredentialStore`：`credentials.yaml` 里的 `refs` 映射（对齐 dsh；旧 `credentials:` 顶层键加载即报错并提示迁移），权限 `0600`，
   写盘是「同目录临时文件 + `fsync` + `rename`」；文件不存在等同于「全部未配置」。
+- 同一份文件还有 `keys` 段：对外 API key 只存 `sha256` 摘要，明文只在创建/轮换时返回一次。
 - `CredentialStore` 是插拔点：以后接 keyring / Vault / 配置中心，只需新增实现，`server` 与 `console` 不动。
 - 控制台接口：`GET /console/api/credentials` 列表、`PUT /console/api/credentials/{name}` 写入/轮换、
   `DELETE /console/api/credentials/{name}` 删除；三者都只回 `{name, reference, configured, source, writable}`。

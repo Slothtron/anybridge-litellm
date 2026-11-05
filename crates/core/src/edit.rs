@@ -17,8 +17,9 @@ use crate::credential::{credential_ref_for, CredentialRef};
 
 /// 控制台写接口接受的 provider 草稿。
 ///
-/// `api_key_env` 是**环境变量名**（可带 `os.environ/` 前缀，会被归一化）；
-/// `None` 或空串表示「更新时保留原值」，新建时视为必填缺失。
+/// `api_key_env` 三态：`None` → 按 provider id 派生引用（保持既有约定）；
+/// `Some("")` → 删除 `api_key` 键（该 provider 靠自定义请求头鉴权）；
+/// `Some("credential/<name>")` → 校验后写入指定引用。
 #[derive(Debug, Clone, Default)]
 pub struct ProviderDraft {
     /// provider id（配置键、路径段）。
@@ -28,6 +29,8 @@ pub struct ProviderDraft {
     pub api: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    /// 自定义请求头；值可为 `credential/<name>` 引用或字面量。
+    pub headers: Vec<(String, String)>,
     pub timeout: Option<u64>,
     pub api_version: Option<String>,
 }
@@ -112,15 +115,22 @@ impl Document {
         );
         insert_str(&mut mapping, "base_url", &draft.base_url);
 
-        // 凭据引用由 provider id 派生（`upper(id)` + `_API_KEY`），不接受手填。
-        // 显式传了 api_key 时仍然校验语法，避免静默接受非法引用。
-        if let Some(raw) = draft.api_key_env.as_deref().map(str::trim) {
-            if !raw.is_empty() {
-                CredentialRef::parse_at(raw, &format!("{path}.api_key"))?;
+        // 凭据引用：缺省按 provider id 派生；空串表示「不使用 API 密钥」；
+        // 显式引用仍然校验语法，避免静默接受非法值。
+        match draft.api_key_env.as_deref().map(str::trim) {
+            None => {
+                let derived = credential_ref_for(&name)?;
+                insert_str(&mut mapping, "api_key", &derived.to_string());
+            }
+            Some("") => {
+                mapping.remove("api_key");
+            }
+            Some(raw) => {
+                let reference = CredentialRef::parse_at(raw, &format!("{path}.api_key"))?;
+                insert_str(&mut mapping, "api_key", &reference.to_string());
             }
         }
-        let derived = credential_ref_for(&name)?;
-        insert_str(&mut mapping, "api_key", &derived.to_string());
+        set_headers(&mut mapping, &draft.headers);
 
         set_optional_u64(&mut mapping, "timeout", draft.timeout);
         set_optional_str(&mut mapping, "api_version", draft.api_version.as_deref());
@@ -341,6 +351,27 @@ fn set_optional_str(mapping: &mut Mapping, key: &str, value: Option<&str>) {
     }
 }
 
+/// 写 `headers` 映射：跳过空名/空值的行，全空时删除整个键。
+fn set_headers(mapping: &mut Mapping, headers: &[(String, String)]) {
+    let mut section = Mapping::new();
+    for (name, value) in headers {
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        section.insert(
+            Value::String(name.to_string()),
+            Value::String(value.to_string()),
+        );
+    }
+    if section.is_empty() {
+        mapping.remove("headers");
+    } else {
+        mapping.insert(Value::String("headers".into()), Value::Mapping(section));
+    }
+}
+
 fn set_optional_u64(mapping: &mut Mapping, key: &str, value: Option<u64>) {
     match value {
         Some(value) => {
@@ -402,6 +433,7 @@ providers:
             api: "completions".into(),
             base_url: "http://127.0.0.1:11434/v1".into(),
             api_key_env: Some("credential/openai".into()),
+            headers: Vec::new(),
             timeout: Some(30),
             api_version: None,
         }
@@ -749,6 +781,8 @@ providers: {}
         .unwrap();
         let mut draft = provider_draft("openai");
         draft.display_name = Some("OpenAI 官方".into());
+        // 缺省引用 → 按 provider id 派生。
+        draft.api_key_env = None;
         doc.upsert_provider(&draft, true).unwrap();
         let yaml = doc.to_yaml().unwrap();
         assert!(yaml.contains("name: OpenAI 官方"), "{yaml}");
@@ -764,5 +798,38 @@ providers: {}
             let errors = doc.upsert_provider(&draft, true).unwrap_err();
             assert_eq!(paths(&errors), vec!["providers.local.api_key"]);
         }
+    }
+
+    #[test]
+    fn api_key_can_be_removed_in_favor_of_headers() {
+        let mut doc = Document::parse(BASE).unwrap();
+        let mut draft = provider_draft("local");
+        draft.api_key_env = None;
+        doc.upsert_provider(&draft, true).unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        assert!(yaml.contains("api_key: credential/LOCAL_API_KEY"), "{yaml}");
+
+        // 空串 → 删除 api_key，写入自定义请求头。
+        draft.api_key_env = Some(String::new());
+        draft.headers = vec![
+            ("Cookie".into(), "credential/WPS_SID".into()),
+            ("X-Tenant-Id".into(), "acme".into()),
+            ("   ".into(), "ignored".into()),
+            ("X-Empty".into(), "  ".into()),
+        ];
+        doc.upsert_provider(&draft, false).unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        let local = yaml.split("local:").nth(1).expect("应包含 local provider");
+        assert!(!local.contains("api_key:"), "api_key 应被删除：{yaml}");
+        assert!(yaml.contains("Cookie: credential/WPS_SID"), "{yaml}");
+        assert!(yaml.contains("X-Tenant-Id: acme"), "{yaml}");
+        assert!(!yaml.contains("X-Empty"), "空值行应跳过：{yaml}");
+
+        // 空 headers → 删除整个键。
+        draft.headers = vec![("X-Ok".into(), " ".into())];
+        doc.upsert_provider(&draft, false).unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        let local = yaml.split("local:").nth(1).unwrap();
+        assert!(!local.contains("headers:"), "{yaml}");
     }
 }

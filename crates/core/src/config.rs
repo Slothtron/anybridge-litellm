@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_yaml::{Mapping, Value};
 
 use crate::credential::CredentialRef;
-use crate::domain::{ApiKind, Modality, ModelEntry, ModelRoute, ProviderConfig};
+use crate::domain::{ApiKind, HeaderSource, Modality, ModelEntry, ModelRoute, ProviderConfig};
 use crate::error::{ErrorKind, GatewayError};
 
 /// 服务名，用于 `GET /` 的 `name` 字段。
@@ -25,11 +25,12 @@ const ROOT_KEYS: [&str; 4] = ["server", "auth", "credentials", "providers"];
 const SERVER_KEYS: [&str; 1] = ["bind"];
 const AUTH_KEYS: [&str; 1] = ["master_key"];
 const CREDENTIALS_KEYS: [&str; 1] = ["file"];
-const PROVIDER_KEYS: [&str; 7] = [
+const PROVIDER_KEYS: [&str; 8] = [
     "api",
     "name",
     "base_url",
     "api_key",
+    "headers",
     "timeout",
     "api_version",
     "models",
@@ -158,7 +159,8 @@ impl GatewayConfig {
             api: provider_config.api,
             model: entry,
             base_url: &provider_config.base_url,
-            api_key: &provider_config.api_key,
+            api_key: provider_config.api_key.as_ref(),
+            headers: &provider_config.headers,
             api_version: provider_config.api_version.as_deref(),
             timeout: provider_config.timeout,
         })
@@ -459,8 +461,9 @@ impl Ctx {
         let api = self.parse_api(mapping, &base);
         let display_name = self.optional_str(mapping, "name", &base);
         let base_url = self.parse_base_url(mapping, &base);
-        // `api_key` 只接受 `credential/<name>` 引用；值由凭据存储按请求解析。
-        let api_key = match self.required_str(mapping, "api_key", &base) {
+        // `api_key` 可选：只接受 `credential/<name>` 引用；缺省表示该 provider
+        // 不使用 API 密钥（例如靠 `headers` 里的 Cookie 鉴权）。
+        let api_key = match self.optional_str(mapping, "api_key", &base) {
             Some(raw) => CredentialRef::parse_at(&raw, &format!("{base}.api_key"))
                 .map_err(|errors| {
                     self.errors.extend(errors.0);
@@ -468,6 +471,7 @@ impl Ctx {
                 .ok(),
             None => None,
         };
+        let headers = self.parse_headers(mapping, &base);
         let timeout = self
             .optional_positive_u64(mapping, "timeout", &base)
             .map_or(
@@ -481,11 +485,59 @@ impl Ctx {
             api: api?,
             name: display_name,
             base_url: base_url?,
-            api_key: api_key?,
+            api_key,
+            headers,
             api_version,
             timeout,
             models,
         })
+    }
+
+    /// `headers`：自定义请求头映射。值是 `credential/<name>` 时按凭据引用，
+    /// 其余按字面量；header 名与值都做语法校验，非法即报字段路径。
+    fn parse_headers(&mut self, mapping: &Mapping, base: &str) -> Vec<(String, HeaderSource)> {
+        let path = format!("{base}.headers");
+        let mut headers = Vec::new();
+        match get(mapping, "headers") {
+            None | Some(Value::Null) => {}
+            Some(Value::Mapping(entries)) => {
+                for (key, value) in entries {
+                    let Some(name) = key.as_str() else {
+                        self.err(&path, "请求头名必须是字符串");
+                        continue;
+                    };
+                    let item_path = format!("{path}.{name}");
+                    if !valid_header_name(name) {
+                        self.err(&item_path, "不是合法的 HTTP 请求头名");
+                        continue;
+                    }
+                    let Some(raw) = value.as_str() else {
+                        self.err(&item_path, "必须是字符串");
+                        continue;
+                    };
+                    let raw = raw.trim();
+                    if raw.is_empty() {
+                        self.err(&item_path, "不能为空");
+                        continue;
+                    }
+                    if raw.starts_with(crate::credential::PREFIX) {
+                        match CredentialRef::parse_at(raw, &item_path) {
+                            Ok(reference) => {
+                                headers
+                                    .push((name.to_string(), HeaderSource::Credential(reference)));
+                            }
+                            Err(errors) => self.errors.extend(errors.0),
+                        }
+                    } else if raw.chars().any(|c| c.is_control()) {
+                        self.err(&item_path, "不能包含控制字符");
+                    } else {
+                        headers.push((name.to_string(), HeaderSource::Literal(raw.to_string())));
+                    }
+                }
+            }
+            Some(_) => self.err(&path, "必须是映射"),
+        }
+        headers
     }
 
     fn parse_api(&mut self, mapping: &Mapping, base: &str) -> Option<ApiKind> {
@@ -817,6 +869,31 @@ fn valid_provider_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
+/// RFC 7230 `token`：只允许可见 ASCII 中除分隔符外的字符。
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 fn valid_base_url(url: &str) -> bool {
     let rest = url
         .strip_prefix("http://")
@@ -890,13 +967,22 @@ providers:
         assert_eq!(config.auth.master_key, "test-master-key");
         assert_eq!(
             config.provider_names(),
-            vec!["anthropic", "local", "openai", "openai-responses"]
+            vec![
+                "anthropic",
+                "cookie-auth",
+                "local",
+                "openai",
+                "openai-responses"
+            ]
         );
 
         let openai = config.providers.get("openai").unwrap();
         assert_eq!(openai.api, ApiKind::Completions);
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.api_key.to_string(), "credential/OPENAI_API_KEY");
+        assert_eq!(
+            openai.api_key.as_ref().unwrap().to_string(),
+            "credential/OPENAI_API_KEY"
+        );
         assert_eq!(openai.timeout, Duration::from_secs(600));
         let model = &openai.models[0];
         assert_eq!(model.id, "gpt-4o");
@@ -927,7 +1013,11 @@ providers:
         assert_eq!(route.api, ApiKind::Completions);
         assert_eq!(route.model.id, "gpt-4o");
         assert_eq!(route.base_url, "https://api.openai.com/v1");
-        assert_eq!(route.api_key.to_string(), "credential/test_key");
+        assert_eq!(
+            route.api_key.expect("已配置引用").to_string(),
+            "credential/test_key"
+        );
+        assert!(route.headers.is_empty());
         assert_eq!(route.api_version, None);
         assert_eq!(route.timeout, Duration::from_secs(600));
 
@@ -1042,7 +1132,7 @@ providers:
         assert_eq!(discovery["name"], GATEWAY_NAME);
         assert_eq!(discovery["version"], "1.2.3");
         let providers = discovery["providers"].as_array().unwrap();
-        assert_eq!(providers.len(), 4);
+        assert_eq!(providers.len(), 5);
         let openai = providers
             .iter()
             .find(|p| p["name"] == "openai")
@@ -1060,7 +1150,13 @@ providers:
         assert_eq!(health["version"], "1.2.3");
         assert_eq!(
             health["providers"],
-            serde_json::json!(["anthropic", "local", "openai", "openai-responses"])
+            serde_json::json!([
+                "anthropic",
+                "cookie-auth",
+                "local",
+                "openai",
+                "openai-responses"
+            ])
         );
 
         assert_eq!(GatewayConfig::version(), env!("CARGO_PKG_VERSION"));
@@ -1384,7 +1480,6 @@ providers:
         assert!(got.contains(&"auth.master_key"), "{got:?}");
         assert!(got.contains(&"providers.p.api"), "{got:?}");
         assert!(got.contains(&"providers.p.base_url"), "{got:?}");
-        assert!(got.contains(&"providers.p.api_key"), "{got:?}");
         assert!(got.contains(&"providers.p.models[0].id"), "{got:?}");
     }
 
@@ -1480,7 +1575,14 @@ providers:
         let config = load(MINIMAL).unwrap().config;
         assert_eq!(config.auth.master_key, "literal-key");
         assert_eq!(
-            config.providers.get("openai").unwrap().api_key.to_string(),
+            config
+                .providers
+                .get("openai")
+                .unwrap()
+                .api_key
+                .as_ref()
+                .unwrap()
+                .to_string(),
             "credential/test_key"
         );
     }
@@ -1595,6 +1697,54 @@ providers:
         .unwrap_err();
         assert_eq!(errors.0[0].path, "config");
         assert_eq!(errors.to_string().lines().count(), 1);
+    }
+
+    #[test]
+    fn provider_headers_accept_literals_and_credential_refs() {
+        let yaml = MINIMAL.replace(
+            "    api_key: credential/test_key",
+            "    api_key: credential/test_key\n    headers:\n      Cookie: credential/WPS_SID\n      X-Tenant-Id: acme",
+        );
+        let config = load(&yaml).unwrap().config;
+        let provider = config.providers.get("openai").unwrap();
+        assert_eq!(provider.headers.len(), 2);
+        assert_eq!(provider.headers[0].0, "Cookie");
+        assert_eq!(provider.headers[0].1.to_string(), "credential/WPS_SID");
+        assert!(provider.headers[0].1.is_credential());
+        assert_eq!(provider.headers[1].1.to_string(), "acme");
+        assert!(!provider.headers[1].1.is_credential());
+
+        let route = config.route("openai", "gpt-4o").unwrap();
+        assert_eq!(route.headers.len(), 2);
+    }
+
+    #[test]
+    fn api_key_is_optional() {
+        let yaml = MINIMAL.replace("    api_key: credential/test_key\n", "");
+        let config = load(&yaml).unwrap().config;
+        assert!(config.providers.get("openai").unwrap().api_key.is_none());
+        assert!(config.route("openai", "gpt-4o").unwrap().api_key.is_none());
+    }
+
+    #[test]
+    fn invalid_headers_are_rejected_with_field_paths() {
+        for (header, expected) in [
+            ("Bad Header: x", "providers.openai.headers.Bad Header"),
+            ("X-Ok: \"\"", "providers.openai.headers.X-Ok"),
+            ("X-Ok: 1", "providers.openai.headers.X-Ok"),
+            ("X-Ok: credential/1bad", "providers.openai.headers.X-Ok"),
+        ] {
+            let yaml = MINIMAL.replace(
+                "    api_key: credential/test_key",
+                &format!("    api_key: credential/test_key\n    headers:\n      {header}"),
+            );
+            let errors = errors_of(&yaml);
+            let got = paths(&errors);
+            assert!(
+                got.contains(&expected),
+                "header `{header}` 应报 `{expected}`，实际 {got:?}"
+            );
+        }
     }
 
     #[test]

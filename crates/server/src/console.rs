@@ -15,12 +15,12 @@ use std::collections::HashMap;
 use anybridge_litellm_core::config::GATEWAY_NAME;
 use anybridge_litellm_core::credential::CredentialRef;
 use anybridge_litellm_core::edit::{ModelDraft, ProviderDraft};
-use anybridge_litellm_core::CredentialError;
 use anybridge_litellm_core::CredentialInfo;
+use anybridge_litellm_core::{ApiKeyDraft, ApiKeyError, ApiKeyInfo, CredentialError, HeaderSource};
 use anybridge_litellm_core::{ConfigErrors, Document, GatewayConfig};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::header::{self, HeaderValue};
+use axum::http::header::{self, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -191,6 +191,12 @@ pub fn router() -> Router<AppState> {
             "/console/api/credentials/{name}",
             put(set_credential).delete(delete_credential),
         )
+        .route("/console/api/keys", get(list_keys).post(create_key))
+        .route(
+            "/console/api/keys/{name}",
+            patch(update_key).delete(delete_key),
+        )
+        .route("/console/api/keys/{name}/rotate", post(rotate_key))
         .route("/console/assets/{*path}", get(asset))
         .route("/console/{*path}", get(spa_fallback))
 }
@@ -437,19 +443,31 @@ async fn upstream_models(
     let Some(provider_config) = snapshot.config.providers.get(&provider) else {
         return provider_missing(&provider);
     };
-    let Some(credential) = state.credentials.resolve(&provider_config.api_key) else {
-        return error_with(
-            StatusCode::CONFLICT,
-            "credential_not_configured",
-            "该 provider 的凭据还没配置：先写入密钥值再拉取上游模型",
-        );
+    // `api_key` 可选：没有密钥时仍带上自定义请求头探活（Cookie 鉴权的上游）。
+    let api_key = match &provider_config.api_key {
+        Some(reference) => match state.credentials.resolve(reference) {
+            Some(credential) => Some(credential.value),
+            None => {
+                return error_with(
+                    StatusCode::CONFLICT,
+                    "credential_not_configured",
+                    "该 provider 的凭据还没配置：先写入密钥值再拉取上游模型",
+                )
+            }
+        },
+        None => None,
+    };
+    let headers = match resolve_provider_headers(&state, &provider_config.headers) {
+        Ok(headers) => headers,
+        Err(failure) => return failure.into_response(),
     };
     match fetch_upstream_models(
         &state,
         &provider_config.base_url,
         provider_config.api,
         provider_config.api_version.as_deref(),
-        &credential.value,
+        api_key.as_deref(),
+        &headers,
     )
     .await
     {
@@ -477,15 +495,28 @@ async fn probe_upstream_models(State(state): State<AppState>, req: Request) -> R
             )
         }
     };
-    if payload.api_key.trim().is_empty() {
-        return error_with(StatusCode::BAD_REQUEST, "invalid_request", "先填 API 密钥");
-    }
+    let headers: Vec<(String, String)> = payload
+        .headers
+        .iter()
+        .map(|header| {
+            (
+                header.name.trim().to_string(),
+                header.value.trim().to_string(),
+            )
+        })
+        .collect();
+    let api_key = payload
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     match fetch_upstream_models(
         &state,
         payload.base_url.trim(),
         api,
         payload.api_version.as_deref(),
-        payload.api_key.trim(),
+        api_key,
+        &headers,
     )
     .await
     {
@@ -632,24 +663,113 @@ fn normalize_upstream_model(id: &str, item: &Value) -> Value {
     Value::Object(model)
 }
 
-/// 上游请求构造器：同一套鉴权头，供标准列表与原生列表两个请求复用。
+/// 上游请求构造器：同一套鉴权头 + provider 自定义头，供标准列表与原生列表两个请求复用。
+///
+/// 自定义头最后写入，覆盖同名鉴权头；`api_key = None` 时不注入任何鉴权头。
 fn upstream_get(
     state: &AppState,
     url: &str,
     api: anybridge_litellm_core::ApiKind,
     api_version: Option<&str>,
-    api_key: &str,
-) -> reqwest::RequestBuilder {
-    let builder = state
+    api_key: Option<&str>,
+    headers: &[(String, String)],
+) -> Result<reqwest::RequestBuilder, UpstreamFailure> {
+    let mut map = HeaderMap::new();
+    if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
+        match api {
+            anybridge_litellm_core::ApiKind::Anthropic => {
+                map.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(api_key).map_err(|_| {
+                        UpstreamFailure::new(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "API 密钥不是合法的 HTTP 头值",
+                        )
+                    })?,
+                );
+                map.insert(
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_str(api_version.unwrap_or("2023-06-01")).map_err(|_| {
+                        UpstreamFailure::new(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "api_version 不是合法的 HTTP 头值",
+                        )
+                    })?,
+                );
+            }
+            _ => {
+                map.insert(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
+                        UpstreamFailure::new(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "API 密钥不是合法的 HTTP 头值",
+                        )
+                    })?,
+                );
+            }
+        }
+    }
+    for (name, value) in headers {
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            return Err(UpstreamFailure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "自定义请求头的名称和值都不能为空",
+            ));
+        }
+        map.insert(
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                UpstreamFailure::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    format!("请求头名 `{name}` 不合法"),
+                )
+            })?,
+            HeaderValue::from_str(value).map_err(|_| {
+                UpstreamFailure::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    format!("请求头 `{name}` 的值不合法"),
+                )
+            })?,
+        );
+    }
+    Ok(state
         .client
         .get(url)
-        .timeout(std::time::Duration::from_secs(30));
-    match api {
-        anybridge_litellm_core::ApiKind::Anthropic => builder
-            .header("x-api-key", api_key)
-            .header("anthropic-version", api_version.unwrap_or("2023-06-01")),
-        _ => builder.header("authorization", format!("Bearer {api_key}")),
+        .timeout(std::time::Duration::from_secs(30))
+        .headers(map))
+}
+
+/// 按请求解析 provider 的 `headers`：`credential/` 引用走凭据存储，其余按字面量。
+fn resolve_provider_headers(
+    state: &AppState,
+    headers: &[(String, HeaderSource)],
+) -> Result<Vec<(String, String)>, UpstreamFailure> {
+    let mut resolved = Vec::with_capacity(headers.len());
+    for (name, source) in headers {
+        let value = match source {
+            HeaderSource::Literal(value) => value.clone(),
+            HeaderSource::Credential(reference) => match state.credentials.resolve(reference) {
+                Some(credential) => credential.value,
+                None => {
+                    return Err(UpstreamFailure::new(
+                        StatusCode::CONFLICT,
+                        "credential_not_configured",
+                        format!("请求头 `{name}` 引用的凭据 `{reference}` 未配置"),
+                    ))
+                }
+            },
+        };
+        resolved.push((name.clone(), value));
     }
+    Ok(resolved)
 }
 
 /// 上游原生模型列表（`{base_url}/universal/model_list`，WPSAI 等自建网关）：
@@ -662,10 +782,12 @@ async fn fetch_universal_models(
     base_url: &str,
     api: anybridge_litellm_core::ApiKind,
     api_version: Option<&str>,
-    api_key: &str,
+    api_key: Option<&str>,
+    headers: &[(String, String)],
 ) -> Option<Vec<Value>> {
     let url = format!("{}/universal/model_list", base_url.trim_end_matches('/'));
-    let response = upstream_get(state, &url, api, api_version, api_key)
+    let response = upstream_get(state, &url, api, api_version, api_key, headers)
+        .ok()?
         .send()
         .await
         .ok()?;
@@ -769,10 +891,11 @@ async fn fetch_upstream_models(
     base_url: &str,
     api: anybridge_litellm_core::ApiKind,
     api_version: Option<&str>,
-    api_key: &str,
+    api_key: Option<&str>,
+    headers: &[(String, String)],
 ) -> Result<Vec<Value>, UpstreamFailure> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let builder = upstream_get(state, &url, api, api_version, api_key);
+    let builder = upstream_get(state, &url, api, api_version, api_key, headers)?;
 
     let response = builder.send().await.map_err(|err| {
         UpstreamFailure::new(
@@ -829,7 +952,7 @@ async fn fetch_upstream_models(
 
     // 标准列表缺容量/模态时，用上游原生列表补齐（尽力而为，失败不影响主列表）。
     if let Some(universal) =
-        fetch_universal_models(state, base_url, api, api_version, api_key).await
+        fetch_universal_models(state, base_url, api, api_version, api_key, headers).await
     {
         merge_universal_models(&mut models, &universal);
     }
@@ -1000,6 +1123,92 @@ fn credential_json(name: &str, info: &CredentialInfo) -> Value {
     })
 }
 
+// ---- 对外 API key ----
+
+/// `GET /console/api/keys`：列出对外 API key（只有元信息，没有明文与摘要）。
+async fn list_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = guard_console(&state, &headers) {
+        return response;
+    }
+    Json(json!({ "keys": key_json_list(&state.api_keys.list()) })).into_response()
+}
+
+/// `POST /console/api/keys`：新建；响应里**只此一次**返回明文。
+async fn create_key(State(state): State<AppState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let payload: ApiKeyPayload = match read_json(&state, &parts.headers, body).await {
+        Ok(payload) => payload,
+        Err(response) => return *response,
+    };
+    let draft = ApiKeyDraft {
+        name: payload.name,
+        scope: payload.scope,
+        description: payload.description,
+        enabled: payload.enabled,
+    };
+    match state.api_keys.create(&draft) {
+        Ok((info, secret)) => {
+            Json(json!({ "key": key_json(&info), "secret": secret })).into_response()
+        }
+        Err(err) => key_error(err),
+    }
+}
+
+/// `PATCH /console/api/keys/{name}`：改 scope / 说明 / 启停（名字不可改）。
+async fn update_key(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    req: Request,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    let payload: ApiKeyUpdatePayload = match read_json(&state, &parts.headers, body).await {
+        Ok(payload) => payload,
+        Err(response) => return *response,
+    };
+    let draft = ApiKeyDraft {
+        name: name.clone(),
+        scope: payload.scope,
+        description: payload.description,
+        enabled: payload.enabled,
+    };
+    match state.api_keys.update(&name, &draft) {
+        Ok(info) => Json(json!({ "key": key_json(&info) })).into_response(),
+        Err(err) => key_error(err),
+    }
+}
+
+/// `POST /console/api/keys/{name}/rotate`：轮换明文，旧值立刻失效。
+async fn rotate_key(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guard_console(&state, &headers) {
+        return response;
+    }
+    match state.api_keys.rotate(&name) {
+        Ok((info, secret)) => {
+            Json(json!({ "key": key_json(&info), "secret": secret })).into_response()
+        }
+        Err(err) => key_error(err),
+    }
+}
+
+/// `DELETE /console/api/keys/{name}`：删除（明文立刻失效）。
+async fn delete_key(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guard_console(&state, &headers) {
+        return response;
+    }
+    match state.api_keys.delete(&name) {
+        Ok(()) => Json(json!({ "deleted": name })).into_response(),
+        Err(err) => key_error(err),
+    }
+}
+
 fn credential_error(err: CredentialError) -> Response {
     match err {
         CredentialError::ReadOnly => error_with(
@@ -1030,10 +1239,14 @@ struct ProviderPayload {
     display_name: Option<String>,
     api: String,
     base_url: String,
-    /// 只接受 `credential/<name>` 引用；空/缺省表示更新时保留原引用。
-    /// 密钥值走 `PUT /console/api/credentials/{name}`，永远不进配置文件。
+    /// 只接受 `credential/<name>` 引用；空串表示「不使用 API 密钥」，
+    /// 缺省表示按 provider id 派生。密钥值走 `PUT /console/api/credentials/{name}`，
+    /// 永远不进配置文件。
     #[serde(default)]
     api_key: Option<String>,
+    /// 自定义请求头；值可为 `credential/<name>` 引用或字面量。
+    #[serde(default)]
+    headers: Vec<ProviderHeaderPayload>,
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default)]
@@ -1048,10 +1261,23 @@ impl ProviderPayload {
             api: self.api,
             base_url: self.base_url,
             api_key_env: self.api_key,
+            headers: self
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value))
+                .collect(),
             timeout: self.timeout,
             api_version: self.api_version,
         }
     }
+}
+
+/// 自定义请求头的写接口形状；`value` 以 `credential/` 开头即为凭据引用。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderHeaderPayload {
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1062,7 +1288,35 @@ struct ProbePayload {
     #[serde(default)]
     api_version: Option<String>,
     /// 表单里刚填的明文密钥；只用于本次探活，不落盘、不回显。
-    api_key: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    headers: Vec<ProviderHeaderPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApiKeyPayload {
+    name: String,
+    scope: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApiKeyUpdatePayload {
+    scope: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -1132,7 +1386,32 @@ fn console_state(state: &AppState, snapshot: &Snapshot) -> Value {
                 .iter()
                 .map(console_model)
                 .collect();
-            let credential = state.credentials.describe(&provider.api_key);
+            let credential = provider
+                .api_key
+                .as_ref()
+                .map(|reference| state.credentials.describe(reference));
+            let api_key = match &provider.api_key {
+                Some(reference) => json!({
+                    "kind": "credential",
+                    "name": reference.name(),
+                    "reference": reference.to_string(),
+                    "configured": credential.as_ref().is_some_and(|info| info.configured),
+                    "source": credential.as_ref().and_then(|info| info.source.clone()),
+                    "writable": credential.as_ref().is_some_and(|info| info.writable),
+                }),
+                None => Value::Null,
+            };
+            let headers: Vec<Value> = provider
+                .headers
+                .iter()
+                .map(|(name, source)| {
+                    json!({
+                        "name": name,
+                        "value": source.to_string(),
+                        "credential": source.is_credential(),
+                    })
+                })
+                .collect();
             json!({
                 "name": name,
                 "display_name": provider.name,
@@ -1141,14 +1420,8 @@ fn console_state(state: &AppState, snapshot: &Snapshot) -> Value {
                 "base_url": provider.base_url,
                 "timeout": provider.timeout.as_secs(),
                 "api_version": provider.api_version,
-                "api_key": {
-                    "kind": "credential",
-                    "name": provider.api_key.name(),
-                    "reference": provider.api_key.to_string(),
-                    "configured": credential.configured,
-                    "source": credential.source,
-                    "writable": credential.writable,
-                },
+                "api_key": api_key,
+                "headers": headers,
                 "models": models,
             })
         })
@@ -1166,7 +1439,51 @@ fn console_state(state: &AppState, snapshot: &Snapshot) -> Value {
             .location()
             .map(|path| path.display().to_string()),
         "providers": providers,
+        "keys": key_json_list(&state.api_keys.list()),
     })
+}
+
+/// 对外 API key 的元信息 → JSON。**永远不含明文与摘要**。
+fn key_json(info: &ApiKeyInfo) -> Value {
+    json!({
+        "name": info.name,
+        "scope": info.scope,
+        "description": info.description,
+        "created_at": info.created_at,
+        "enabled": info.enabled,
+    })
+}
+
+fn key_json_list(keys: &[ApiKeyInfo]) -> Vec<Value> {
+    keys.iter().map(key_json).collect()
+}
+
+fn key_error(err: ApiKeyError) -> Response {
+    match err {
+        ApiKeyError::ReadOnly => error_with(
+            StatusCode::CONFLICT,
+            "read_only",
+            "服务以只读方式启动，API 密钥不可写",
+        ),
+        ApiKeyError::Invalid(message) => {
+            error_with(StatusCode::BAD_REQUEST, "invalid_request", &message)
+        }
+        ApiKeyError::NotFound(name) => error_with(
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            &format!("API key `{name}` 不存在"),
+        ),
+        ApiKeyError::Conflict(name) => error_with(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            &format!("API key `{name}` 已存在"),
+        ),
+        ApiKeyError::Io(message) => error_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "credential_error",
+            &message,
+        ),
+    }
 }
 
 /// `/models` 的卡片 → 控制台模型对象。字段来源与 `/models` 保持一致。

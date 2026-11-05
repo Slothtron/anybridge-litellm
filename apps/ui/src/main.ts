@@ -1,21 +1,26 @@
 import "./app.css";
 import {
+  deleteKey,
   fetchState,
   modelPath,
   mutate,
   providerPath,
+  rotateKey,
+  type ApiKeyEntry,
   type ModelDraft,
   type ModelEntry,
   type MutationResult,
   type ProviderEntry,
 } from "./api";
 import { confirmDialog, openForm, type FormValues } from "./form";
+import { openKeyDialog, openSecretDialog } from "./key-dialog";
 import { draftFromValues, modelFieldSpecs, text } from "./model-fields";
 import { openProviderDialog } from "./provider-dialog";
 import {
   clearError,
   mountShell,
   renderAbout,
+  renderApiKeys,
   renderErrorState,
   renderLoading,
   renderProviderDetail,
@@ -49,17 +54,27 @@ if (root === null) {
 let requestId = 0;
 
 /**
- * hash 路由：`#/` provider 列表、`#/provider/{id}` 详情、`#/about` 关于。
+ * hash 路由：`#/` provider 列表、`#/provider/{id}` 详情、`#/keys` API 密钥、`#/about` 关于。
  * 刷新 / 前进后退都能落回原视图；未知 id 回落列表。
  */
-type Route = { view: "providers" | "about" } | { view: "provider"; name: string };
+type Route =
+  | { view: "providers" | "keys" | "about" }
+  | { view: "provider"; name: string };
 
 function parseRoute(): Route {
   const match = /^#\/provider\/([^/?]+)$/.exec(location.hash);
   if (match !== null) {
     return { view: "provider", name: decodeURIComponent(match[1]) };
   }
+  if (location.hash === "#/keys") {
+    return { view: "keys" };
+  }
   return { view: location.hash === "#/about" ? "about" : "providers" };
+}
+
+/** 路由 → 顶部导航高亮项。详情页仍归属 Provider。 */
+function navView(view: Route["view"]): "providers" | "keys" | "about" {
+  return view === "provider" ? "providers" : view;
 }
 
 let route: Route = parseRoute();
@@ -71,7 +86,7 @@ const shell = mountShell(
   },
   (next) => {
     // 导航按钮只改 hash，真正的重渲染统一由 hashchange 驱动。
-    const target = next === "about" ? "#/about" : "#/";
+    const target = next === "about" ? "#/about" : next === "keys" ? "#/keys" : "#/";
     if (location.hash === target) {
       void load();
       return;
@@ -79,11 +94,11 @@ const shell = mountShell(
     location.hash = target;
   },
 );
-setActiveView(shell, route.view === "about" ? "about" : "providers");
+setActiveView(shell, navView(route.view));
 
 window.addEventListener("hashchange", () => {
   route = parseRoute();
-  setActiveView(shell, route.view === "about" ? "about" : "providers");
+  setActiveView(shell, navView(route.view));
   void load();
 });
 
@@ -185,6 +200,56 @@ async function removeModels(
   await load();
 }
 
+async function removeApiKey(key: ApiKeyEntry): Promise<void> {
+  const confirmed = await confirmDialog({
+    title: "删除 API 密钥",
+    message: `确定删除 API 密钥 \`${key.name}\`？\n调用方持有的明文会立即失效。`,
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+  const result = await deleteKey(key.name);
+  if (result.kind !== "ok") {
+    showError(
+      shell,
+      result.kind === "unauthorized" ? "登录态已失效，请刷新页面" : result.message,
+    );
+    return;
+  }
+  clearError(shell);
+  await load();
+}
+
+async function rotateApiKey(key: ApiKeyEntry): Promise<void> {
+  const confirmed = await confirmDialog({
+    title: "轮换 API 密钥",
+    message: `确定轮换 API 密钥 \`${key.name}\`？\n旧明文会立刻失效，新明文只显示一次。`,
+    confirmLabel: "轮换",
+    danger: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+  const result = await rotateKey(key.name);
+  if (result.kind !== "ok") {
+    showError(
+      shell,
+      result.kind === "unauthorized" ? "登录态已失效，请刷新页面" : result.message,
+    );
+    return;
+  }
+  clearError(shell);
+  if (result.secret !== undefined) {
+    openSecretDialog(result.secret);
+  }
+  await load();
+}
+
+/** provider id 列表：API 密钥对话框的 scope 多选数据源。 */
+let providerNames: string[] = [];
+
 const actions: RowActions = {
   editable: true,
   onCreateProvider: () => {
@@ -203,6 +268,18 @@ const actions: RowActions = {
   },
   onBatchDeleteModels: (provider, models) => {
     void removeModels(provider, models);
+  },
+  onCreateKey: () => {
+    openKeyDialog({ key: null, providers: providerNames, onSaved: load });
+  },
+  onEditKey: (key) => {
+    openKeyDialog({ key, providers: providerNames, onSaved: load });
+  },
+  onRotateKey: (key) => {
+    void rotateApiKey(key);
+  },
+  onDeleteKey: (key) => {
+    void removeApiKey(key);
   },
 };
 
@@ -232,10 +309,15 @@ async function load(): Promise<void> {
   }
 
   actions.editable = result.state.editable !== false;
+  providerNames = (result.state.providers ?? []).map((provider) => provider.name);
   // 删除 / 重命名可能让 hash 里的 provider 失效，每次渲染前重新解析。
   route = parseRoute();
   if (route.view === "about") {
     renderAbout(shell, result.state);
+    return;
+  }
+  if (route.view === "keys") {
+    renderApiKeys(shell, result.state, actions);
     return;
   }
   if (route.view === "provider") {

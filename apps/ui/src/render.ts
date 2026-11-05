@@ -6,11 +6,11 @@
  * 所有来自状态接口的字符串都通过 textContent 写入，避免拼接 HTML。
  */
 
-import type { ConsoleState, ModelEntry, ProviderEntry } from "./api";
+import type { ApiKeyEntry, ConsoleState, ModelEntry, ProviderEntry } from "./api";
 import { icon, type IconName } from "./icons";
 
-/** 控制台的两个视图；顶部导航切换，切视图不刷新页面。 */
-export type View = "providers" | "about";
+/** 控制台的视图；顶部导航切换，切视图不刷新页面。 */
+export type View = "providers" | "keys" | "about";
 
 export interface Shell {
   content: HTMLElement;
@@ -53,6 +53,10 @@ export interface RowActions {
   onEditModel(provider: ProviderEntry, model: ModelEntry): void;
   onDeleteModel(provider: ProviderEntry, model: ModelEntry): void;
   onBatchDeleteModels(provider: ProviderEntry, models: ModelEntry[]): void;
+  onCreateKey(): void;
+  onEditKey(key: ApiKeyEntry): void;
+  onRotateKey(key: ApiKeyEntry): void;
+  onDeleteKey(key: ApiKeyEntry): void;
 }
 
 const numberFormat = new Intl.NumberFormat("en-US");
@@ -116,7 +120,7 @@ async function writeClipboard(text: string): Promise<void> {
   }
 }
 
-function copyButton(text: string, label = text): HTMLButtonElement {
+export function copyButton(text: string, label = text): HTMLButtonElement {
   const button = el("button", "btn btn-xs btn-ghost shrink-0 text-subtle");
   button.type = "button";
   button.append(icon("clipboard"));
@@ -357,6 +361,116 @@ function portOf(bind: string | undefined): string | undefined {
   return index >= 0 && index < bind.length - 1 ? bind.slice(index + 1) : bind;
 }
 
+/** 对外 API key 页：列表 + 新建；明文只在创建/轮换后显示一次。 */
+export function renderApiKeys(
+  shell: Shell,
+  state: ConsoleState,
+  actions: RowActions,
+): void {
+  applyServiceName(shell, state);
+  const content = shell.content;
+  content.textContent = "";
+
+  const section = el("section", "mt-8 flex flex-col gap-3");
+  const create = actions.editable
+    ? actionButton("新增密钥", "btn btn-sm btn-primary", actions.onCreateKey)
+    : undefined;
+  section.append(sectionHead("API 密钥", create));
+  section.append(
+    el(
+      "p",
+      "m-0 text-xs leading-relaxed text-muted",
+      "对外调用方出示的密钥；每把密钥只能访问 scope 内的 provider。服务端只存摘要，明文只在创建 / 轮换时显示一次。",
+    ),
+  );
+
+  const keys = Array.isArray(state.keys) ? state.keys : [];
+  if (keys.length === 0) {
+    section.append(
+      emptyState(
+        "还没有对外 API 密钥",
+        "新增一把密钥并选择可访问的 provider；调用方用 Authorization: Bearer <密钥> 访问 /llmproxy。",
+      ),
+    );
+    content.append(section);
+    return;
+  }
+
+  const wrapper = el(
+    "div",
+    "overflow-x-auto rounded-box border border-base-300 bg-base-100 shadow-sm",
+  );
+  const table = el("table", "table table-sm min-w-[760px]");
+  const thead = el("thead");
+  const headRow = el("tr");
+  for (const label of ["名称", "scope", "说明", "创建时间", "状态", ""]) {
+    headRow.append(el("th", "text-xs font-medium text-muted", label));
+  }
+  thead.append(headRow);
+  table.append(thead);
+
+  const tbody = el("tbody");
+  for (const key of keys) {
+    const row = el("tr");
+
+    row.append(el("td", "font-mono text-xs", key.name));
+
+    const scopeCell = el("td");
+    const scopeWrap = el("div", "flex flex-wrap gap-1");
+    for (const item of key.scope) {
+      scopeWrap.append(
+        el(
+          "span",
+          "badge badge-xs badge-ghost font-mono",
+          item === "*" ? "全部" : item,
+        ),
+      );
+    }
+    scopeCell.append(scopeWrap);
+    row.append(scopeCell);
+
+    row.append(el("td", "text-xs text-muted", key.description ?? "-"));
+    row.append(
+      el("td", "whitespace-nowrap font-mono text-xs text-muted", key.created_at),
+    );
+    const statusCell = el("td", "");
+    statusCell.append(
+      el(
+        "span",
+        `badge badge-xs ${key.enabled ? "badge-success" : "badge-ghost"}`,
+        key.enabled ? "启用" : "停用",
+      ),
+    );
+    row.append(statusCell);
+
+    const tools = el("td", "text-right");
+    if (actions.editable) {
+      const wrap = el("div", "flex justify-end gap-1");
+      const edit = el("button", "btn btn-xs btn-ghost", "编辑");
+      edit.type = "button";
+      edit.addEventListener("click", () => actions.onEditKey(key));
+      const rotate = el("button", "btn btn-xs btn-ghost", "轮换");
+      rotate.type = "button";
+      rotate.title = "生成新密钥，旧密钥立刻失效";
+      rotate.addEventListener("click", () => actions.onRotateKey(key));
+      wrap.append(
+        edit,
+        rotate,
+        iconButton("trash", `删除 API 密钥 ${key.name}`, () =>
+          actions.onDeleteKey(key),
+        "text-error"),
+      );
+      tools.append(wrap);
+    }
+    row.append(tools);
+    tbody.append(row);
+  }
+  table.append(tbody);
+  wrapper.append(table);
+  section.append(wrapper);
+  content.append(section);
+}
+
 /** 首页 provider 卡片：只做「入口」，点卡片进详情页，元信息与模型列表都在详情。 */
 function renderProviderCard(provider: ProviderEntry, state: ConsoleState): HTMLElement {
   const models = provider.models ?? [];
@@ -395,6 +509,10 @@ function renderProviderCard(provider: ProviderEntry, state: ConsoleState): HTMLE
         `ml-auto badge badge-sm ${configured ? "badge-success" : "badge-warning"}`,
         configured ? "已配置" : "未配置",
       ),
+    );
+  } else if ((provider.headers ?? []).length > 0) {
+    head.append(
+      el("span", "ml-auto badge badge-sm badge-info", "Header 鉴权"),
     );
   }
   body.append(head);
@@ -524,6 +642,20 @@ export function renderProviderDetail(
       false,
     ),
   );
+  const apiKey = provider.api_key;
+  meta.append(
+    metaRow(
+      "API 密钥",
+      apiKey === null || apiKey === undefined
+        ? "未配置（使用自定义请求头）"
+        : `${apiKey.reference ?? "-"}（${apiKey.configured ? "已配置" : "未配置"}）`,
+      false,
+      true,
+    ),
+  );
+  for (const header of provider.headers ?? []) {
+    meta.append(metaRow(`请求头 ${header.name}`, header.value, true, true));
+  }
   card.append(meta);
   section.append(card);
 
@@ -771,6 +903,7 @@ export function mountShell(
   nav.setAttribute("aria-label", "控制台视图");
   const navButtons = {
     providers: el("button", "btn btn-xs btn-ghost", "Provider"),
+    keys: el("button", "btn btn-xs btn-ghost", "API 密钥"),
     about: el("button", "btn btn-xs btn-ghost", "关于"),
   } as Record<View, HTMLButtonElement>;
   for (const [view, button] of Object.entries(navButtons) as Array<[View, HTMLButtonElement]>) {

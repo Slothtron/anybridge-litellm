@@ -83,17 +83,55 @@ pub struct ModelEntry {
     pub thinking_levels: Vec<String>,
 }
 
+/// provider 级自定义请求头的值来源。
+///
+/// `credential/<name>` 形式按请求从凭据存储解析，其余按字面量发送。
+#[derive(Clone, PartialEq, Eq)]
+pub enum HeaderSource {
+    Literal(String),
+    Credential(CredentialRef),
+}
+
+impl HeaderSource {
+    /// 是否引用凭据文件。
+    pub fn is_credential(&self) -> bool {
+        matches!(self, HeaderSource::Credential(_))
+    }
+}
+
+impl std::fmt::Display for HeaderSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeaderSource::Literal(value) => f.write_str(value),
+            HeaderSource::Credential(reference) => write!(f, "{reference}"),
+        }
+    }
+}
+
+/// 手写 `Debug`：字面量打码，凭据引用只显示引用名。
+impl std::fmt::Debug for HeaderSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeaderSource::Literal(_) => f.write_str("***"),
+            HeaderSource::Credential(reference) => write!(f, "{reference}"),
+        }
+    }
+}
+
 /// 单个 provider 的解析后配置。
 ///
 /// `api_key` 是**凭据引用**，不是明文：值由凭据存储在每次请求时解析，
-/// 因此轮换密钥不需要重启。
+/// 因此轮换密钥不需要重启。为 `None` 时不注入任何鉴权头（由 `headers` 承担，
+/// 例如 Cookie 鉴权的上游）。
 #[derive(Clone)]
 pub struct ProviderConfig {
     pub api: ApiKind,
     /// 可选展示名；为空时界面回退显示 provider id。
     pub name: Option<String>,
     pub base_url: String,
-    pub api_key: CredentialRef,
+    pub api_key: Option<CredentialRef>,
+    /// 自定义请求头；保序，转发时覆盖同名客户端头与鉴权头。
+    pub headers: Vec<(String, HeaderSource)>,
     pub api_version: Option<String>,
     pub timeout: Duration,
     pub models: Vec<ModelEntry>,
@@ -106,7 +144,8 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api", &self.api)
             .field("name", &self.name)
             .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.to_string())
+            .field("api_key", &self.api_key.as_ref().map(ToString::to_string))
+            .field("headers", &self.headers)
             .field("api_version", &self.api_version)
             .field("timeout", &self.timeout)
             .field("models", &self.models)
@@ -121,7 +160,8 @@ pub struct ModelRoute<'a> {
     pub api: ApiKind,
     pub model: &'a ModelEntry,
     pub base_url: &'a str,
-    pub api_key: &'a CredentialRef,
+    pub api_key: Option<&'a CredentialRef>,
+    pub headers: &'a [(String, HeaderSource)],
     pub api_version: Option<&'a str>,
     pub timeout: Duration,
 }
@@ -160,13 +200,40 @@ mod tests {
             api: ApiKind::Completions,
             name: Some("WPS AI".into()),
             base_url: "http://127.0.0.1:1/v1".into(),
-            api_key: CredentialRef::parse_at("credential/wpsai", "api_key").unwrap(),
+            api_key: Some(CredentialRef::parse_at("credential/wpsai", "api_key").unwrap()),
+            headers: vec![
+                (
+                    "Cookie".into(),
+                    HeaderSource::Credential(
+                        CredentialRef::parse_at("credential/wps_sid", "headers").unwrap(),
+                    ),
+                ),
+                ("X-Tenant-Id".into(), HeaderSource::Literal("acme".into())),
+            ],
             api_version: None,
             timeout: Duration::from_secs(1),
             models: Vec::new(),
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("sk-secret"));
+        assert!(
+            !rendered.contains("acme"),
+            "字面量请求头也要打码：{rendered}"
+        );
         assert!(rendered.contains("credential/wpsai"));
+        assert!(rendered.contains("credential/wps_sid"));
+    }
+
+    #[test]
+    fn header_source_display_round_trip() {
+        let literal = HeaderSource::Literal("acme".into());
+        assert_eq!(literal.to_string(), "acme");
+        assert!(!literal.is_credential());
+
+        let reference = HeaderSource::Credential(
+            CredentialRef::parse_at("credential/WPS_SID", "headers").unwrap(),
+        );
+        assert_eq!(reference.to_string(), "credential/WPS_SID");
+        assert!(reference.is_credential());
     }
 }

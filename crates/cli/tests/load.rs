@@ -126,7 +126,7 @@ impl Gateway {
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("config.yaml");
         let credentials = dir.join("credentials.yaml");
-        std::fs::write(&credentials, "credentials:\n  upstream: sk-load-test\n").unwrap();
+        std::fs::write(&credentials, "refs:\n  upstream: sk-load-test\n").unwrap();
         let credentials_display = credentials.display().to_string();
         std::fs::write(
             &config,
