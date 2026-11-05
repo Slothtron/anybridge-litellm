@@ -516,35 +516,57 @@ impl UpstreamFailure {
 }
 
 /// 带上凭据请求 `{base_url}/models`，把响应归一化成 `[{id, name}]`。
-/// 上游模型条目 → 控制台标准字段。别名映射覆盖常见网关/聚合器：
+/// 上游模型条目 → 控制台标准字段。别名映射对齐 DSH `readListing` 并加思考档位：
 ///
-/// - `context_window` ← `context_window` | `context_length` | `max_input_tokens`
-/// - `max_output_tokens` ← `max_output_tokens` | `max_completion_tokens`
+/// - `name` ← `name` | `display_name` | `displayName`
+/// - `context_window` ← `context_window` | `context_length` | `max_input_tokens` | `limit.context`
+/// - `max_output_tokens` ← `max_output_tokens` | `max_completion_tokens` | `max_tokens`
+///   | `limit.output` | `top_provider.max_completion_tokens`
 /// - `input_modalities` ← `input_modalities` | `architecture.input_modalities` | `input`（只留 text/image）
-/// - `reasoning` ← `reasoning` | `supports_reasoning` | `capabilities.reasoning`
+/// - `reasoning` ← `reasoning` | `supports_reasoning` | `capabilities.reasoning`；
+///   另有 `thinking_levels` 非空数组时视为支持推理并透出档位
 ///
 /// 取不到的字段直接省略，不做推断。
 fn normalize_upstream_model(id: &str, item: &Value) -> Value {
     let mut model = serde_json::Map::new();
     model.insert("id".into(), id.into());
-    if let Some(name) = item
-        .get("name")
-        .or_else(|| item.get("display_name"))
-        .and_then(Value::as_str)
+    if let Some(name) = ["name", "display_name", "displayName"]
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_str))
     {
         model.insert("name".into(), name.into());
     }
 
     let context_window = ["context_window", "context_length", "max_input_tokens"]
         .iter()
-        .find_map(|key| item.get(key).and_then(Value::as_u64));
+        .find_map(|key| item.get(key).and_then(Value::as_u64))
+        .or_else(|| {
+            item.get("limit")
+                .and_then(|limit| limit.get("context"))
+                .and_then(Value::as_u64)
+        });
     if let Some(value) = context_window {
         model.insert("context_window".into(), value.into());
     }
 
-    let max_output_tokens = ["max_output_tokens", "max_completion_tokens"]
-        .iter()
-        .find_map(|key| item.get(key).and_then(Value::as_u64));
+    let max_output_tokens = [
+        "max_output_tokens",
+        "max_completion_tokens",
+        "maxTokens",
+        "max_tokens",
+    ]
+    .iter()
+    .find_map(|key| item.get(key).and_then(Value::as_u64))
+    .or_else(|| {
+        item.get("limit")
+            .and_then(|limit| limit.get("output"))
+            .and_then(Value::as_u64)
+    })
+    .or_else(|| {
+        item.get("top_provider")
+            .and_then(|top| top.get("max_completion_tokens"))
+            .and_then(Value::as_u64)
+    });
     if let Some(value) = max_output_tokens {
         model.insert("max_output_tokens".into(), value.into());
     }
@@ -580,8 +602,38 @@ fn normalize_upstream_model(id: &str, item: &Value) -> Value {
                 .and_then(|caps| caps.get("reasoning"))
                 .and_then(Value::as_bool)
         });
-    if let Some(supported) = reasoning {
-        model.insert("reasoning".into(), supported.into());
+
+    // `thinking_levels`（如 ai-kas codeplan）非空即声明支持推理；显式 false 优先，
+    // 避免「false + 档位」这种服务端会拒绝的矛盾载荷。
+    let mut thinking_levels: Vec<&str> = Vec::new();
+    for level in item
+        .get("thinking_levels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|level| !level.trim().is_empty())
+    {
+        if !thinking_levels.contains(&level) {
+            thinking_levels.push(level);
+        }
+    }
+    let supported = reasoning.unwrap_or(!thinking_levels.is_empty());
+    if supported {
+        model.insert("reasoning".into(), true.into());
+        if !thinking_levels.is_empty() {
+            model.insert("thinking_levels".into(), thinking_levels.into());
+        }
+    } else if reasoning == Some(false) {
+        model.insert("reasoning".into(), false.into());
+    }
+
+    if let Some(default) = ["default_thinking_level", "defaultThinkingLevel"]
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_str))
+        .filter(|level| !level.trim().is_empty())
+    {
+        model.insert("default_thinking_level".into(), default.into());
     }
 
     Value::Object(model)

@@ -391,7 +391,10 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       context_window: model.context_window,
       max_output_tokens: model.max_output_tokens,
       input: model.input_modalities,
-      reasoning: model.reasoning,
+      // 上游给了档位即支持推理（服务端归一化已保证 reasoning 与档位一致）。
+      reasoning: model.reasoning ?? (model.thinking_levels?.length ? true : undefined),
+      thinking_levels: model.thinking_levels,
+      default_thinking_level: model.default_thinking_level,
     };
   }
 

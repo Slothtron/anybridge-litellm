@@ -284,6 +284,9 @@ export interface UpstreamModel {
   max_output_tokens?: number;
   input_modalities?: string[];
   reasoning?: boolean;
+  /** 上游直接给档位（如 ai-kas codeplan）时透出；非空等价支持推理。 */
+  thinking_levels?: string[];
+  default_thinking_level?: string;
 }
 
 export type UpstreamModelsResult =
@@ -375,6 +378,15 @@ async function parseUpstreamModels(
     }
     if (typeof item.reasoning === "boolean") {
       model.reasoning = item.reasoning;
+    }
+    if (
+      Array.isArray(item.thinking_levels) &&
+      item.thinking_levels.every((level) => typeof level === "string")
+    ) {
+      model.thinking_levels = item.thinking_levels as string[];
+    }
+    if (typeof item.default_thinking_level === "string") {
+      model.default_thinking_level = item.default_thinking_level;
     }
     models.push(model);
   }

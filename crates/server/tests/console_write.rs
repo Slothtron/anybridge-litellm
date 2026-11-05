@@ -994,6 +994,13 @@ async fn upstream_models_handler() -> axum::Json<Value> {
             // 直写风格：context_window / max_output_tokens / input / reasoning，混入非法模态与去重。
             {"id": "o4-reasoning", "context_window": 200000, "max_output_tokens": 100000,
              "input": ["text", "text", "image"], "reasoning": false},
+            // DSH readListing 的别名：maxTokens / limit.{context,output} / top_provider / displayName。
+            {"id": "dsh-style", "displayName": "DSH Style", "maxTokens": 8192,
+             "limit": {"context": 4096, "output": 2048}, "top_provider": {"max_completion_tokens": 8191}},
+            // ai-kas codeplan 风格：只带 thinking_levels 数组，混入空串与重复档位。
+            {"id": "codeplan", "thinking_levels": ["high", "max", "", "low", "high"]},
+            // reasoning: false 与档位并存 → 显式 false 优先，不透出档位。
+            {"id": "conflict", "reasoning": false, "thinking_levels": ["low"]},
             // 数字字段是字符串或缺失 → 不猜，整段省略。
             {"id": "legacy", "context_window": "128k", "max_completion_tokens": null},
         ],
@@ -1053,7 +1060,18 @@ async fn upstream_models_can_be_imported_selectively() {
         .iter()
         .map(|model| model["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec!["gpt-4o", "gpt-4o-mini", "o4-reasoning", "legacy"]);
+    assert_eq!(
+        ids,
+        vec![
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o4-reasoning",
+            "dsh-style",
+            "codeplan",
+            "conflict",
+            "legacy"
+        ]
+    );
 
     // 标准字段映射：别名归一、非法值省略，取不到就不出现键。
     let models = body["models"].as_array().unwrap();
@@ -1075,6 +1093,32 @@ async fn upstream_models_can_be_imported_selectively() {
         o4["input_modalities"],
         json!(["text", "image"]),
         "去重：{o4:?}"
+    );
+    let dsh = models.iter().find(|m| m["id"] == "dsh-style").unwrap();
+    assert_eq!(dsh["name"], "DSH Style", "displayName 别名：{dsh:?}");
+    assert_eq!(dsh["context_window"], 4096, "limit.context：{dsh:?}");
+    assert_eq!(
+        dsh["max_output_tokens"], 8192,
+        "maxTokens 先于 limit/top_provider：{dsh:?}"
+    );
+    let codeplan = models.iter().find(|m| m["id"] == "codeplan").unwrap();
+    assert_eq!(
+        codeplan["thinking_levels"],
+        json!(["high", "max", "low"]),
+        "档位去重保序、空串剔除：{codeplan:?}"
+    );
+    assert_eq!(
+        codeplan["reasoning"], true,
+        "档位非空即支持推理：{codeplan:?}"
+    );
+    let conflict = models.iter().find(|m| m["id"] == "conflict").unwrap();
+    assert_eq!(
+        conflict["reasoning"], false,
+        "显式 false 优先于档位：{conflict:?}"
+    );
+    assert!(
+        conflict.get("thinking_levels").is_none(),
+        "false 不带档位，避免矛盾载荷：{conflict:?}"
     );
     let bare = models.iter().find(|m| m["id"] == "gpt-4o").unwrap();
     assert!(bare.get("name").is_none(), "无 name 不给 null：{bare:?}");
