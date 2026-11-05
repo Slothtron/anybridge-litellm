@@ -301,8 +301,9 @@ function renderOverview(state: ConsoleState, providers: ProviderEntry[]): HTMLEl
 }
 
 function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLElement {
-  const card = el("article", "card rounded-box border border-base-300 bg-base-100 shadow-sm");
-  const body = el("div", "card-body gap-3 p-4");
+  const models = provider.models ?? [];
+  const card = el("article", "rounded-box border border-base-300 bg-base-100 shadow-sm");
+  const body = el("div", "flex flex-col gap-4 p-4 sm:p-5");
 
   const head = el("div", "flex flex-wrap items-center gap-2");
   head.append(el("h3", "font-mono text-sm font-semibold", textOrDash(provider.name)));
@@ -310,13 +311,26 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   head.append(
     el(
       "span",
-      "ml-auto text-[11px] text-base-content/45",
-      `${formatNumber(provider.models?.length ?? 0)} 个模型`,
+      "text-[11px] text-base-content/45",
+      `${formatNumber(models.length)} 个模型`,
     ),
   );
+  if (actions.editable) {
+    const tools = el("div", "ml-auto flex gap-1.5");
+    tools.append(
+      actionButton("编辑", "btn btn-xs", () => actions.onEditProvider(provider)),
+      actionButton("删除", "btn btn-xs btn-error btn-soft", () =>
+        actions.onDeleteProvider(provider),
+      ),
+    );
+    head.append(tools);
+  }
   body.append(head);
 
-  const meta = el("dl", "m-0 flex flex-col gap-2");
+  const meta = el(
+    "dl",
+    "m-0 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 xl:grid-cols-3",
+  );
   meta.append(metaRow("base_url", provider.base_url));
   meta.append(metaRow("base_path", provider.base_path));
   meta.append(apiKeyRow(provider));
@@ -329,19 +343,38 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   meta.append(metaRow("api_version", provider.api_version));
   body.append(meta);
 
+  // 模型列表收进 provider 详情，不再单独占一个页面区块。
+  const modelsPanel = el("div", "border-t border-base-300/70 pt-3");
+  const modelsHead = el(
+    "div",
+    "mb-2 flex flex-wrap items-center justify-between gap-2",
+  );
+  modelsHead.append(
+    el(
+      "h4",
+      "text-[11px] font-semibold uppercase tracking-[0.14em] text-base-content/50",
+      `模型 (${formatNumber(models.length)})`,
+    ),
+  );
   if (actions.editable) {
-    const tools = el(
-      "div",
-      "card-actions justify-end gap-1.5 border-t border-base-300/70 pt-3",
+    modelsHead.append(
+      actionButton("新增模型", "btn btn-xs", () => actions.onCreateModel(provider)),
     );
-    tools.append(
-      actionButton("编辑", "btn btn-xs", () => actions.onEditProvider(provider)),
-      actionButton("删除", "btn btn-xs btn-error btn-soft", () =>
-        actions.onDeleteProvider(provider),
+  }
+  modelsPanel.append(modelsHead);
+
+  if (models.length === 0) {
+    modelsPanel.append(
+      el(
+        "p",
+        "m-0 rounded-lg border border-dashed border-base-300 px-4 py-6 text-center text-xs text-base-content/45",
+        "该 provider 未配置模型。",
       ),
     );
-    body.append(tools);
+  } else {
+    modelsPanel.append(renderModelTable(provider, models, actions));
   }
+  body.append(modelsPanel);
 
   card.append(body);
   return card;
@@ -364,10 +397,7 @@ function renderProviders(providers: ProviderEntry[], actions: RowActions): HTMLE
     return section;
   }
 
-  const grid = el(
-    "div",
-    "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3",
-  );
+  const grid = el("div", "grid grid-cols-1 gap-4");
   for (const provider of providers) {
     grid.append(renderProviderCard(provider, actions));
   }
@@ -437,57 +467,6 @@ function renderModelTable(
   table.append(tbody);
   scroll.append(table);
   return scroll;
-}
-
-function renderModels(providers: ProviderEntry[], actions: RowActions): HTMLElement {
-  const section = el("section", "mt-8");
-  section.append(
-    el(
-      "h2",
-      "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-base-content/50",
-      "模型",
-    ),
-  );
-
-  if (providers.length === 0) {
-    section.append(emptyState("暂无模型", "模型由 provider 配置生成。"));
-    return section;
-  }
-
-  for (const provider of providers) {
-    const group = el(
-      "div",
-      "mb-4 overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm last:mb-0",
-    );
-    const head = el(
-      "div",
-      "flex flex-wrap items-center gap-2 border-b border-base-300 bg-base-200/60 px-4 py-2.5",
-    );
-    head.append(
-      el("h3", "font-mono text-sm font-semibold", textOrDash(provider.name)),
-    );
-    head.append(apiBadge(provider.api));
-    if (actions.editable) {
-      head.append(
-        actionButton("新增模型", "btn btn-xs ml-auto", () =>
-          actions.onCreateModel(provider),
-        ),
-      );
-    }
-    group.append(head);
-
-    const models = provider.models ?? [];
-    if (models.length === 0) {
-      group.append(
-        el("p", "m-0 px-4 py-6 text-center text-xs text-base-content/45", "该 provider 未配置模型。"),
-      );
-    } else {
-      group.append(renderModelTable(provider, models, actions));
-    }
-    section.append(group);
-  }
-
-  return section;
 }
 
 /** 建立页面骨架；只调用一次。 */
@@ -615,9 +594,5 @@ export function renderState(
     content.append(note);
   }
 
-  content.append(
-    renderOverview(state, providers),
-    renderProviders(providers, actions),
-    renderModels(providers, actions),
-  );
+  content.append(renderOverview(state, providers), renderProviders(providers, actions));
 }

@@ -131,7 +131,7 @@ fn unknown_argument_exits_2() {
 fn bad_config_exits_2_with_field_path() {
     let dir = unique_dir("bad-config");
     let path = dir.join("config.yaml");
-    // 缺 providers 与 auth.master_key。
+    // 缺 auth.master_key；providers 允许为空。
     std::fs::write(
         &path,
         "server:\n  bind: \"127.0.0.1:4000\"\nproviders: {}\n",
@@ -141,10 +141,6 @@ fn bad_config_exits_2_with_field_path() {
     let output = run(&["--config", path.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2), "坏配置应以 2 退出");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("providers"),
-        "stderr 应含字段路径：{stderr}"
-    );
     assert!(
         stderr.contains("auth.master_key"),
         "stderr 应含字段路径：{stderr}"

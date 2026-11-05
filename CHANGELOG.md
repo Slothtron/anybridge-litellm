@@ -21,6 +21,8 @@
   - 全部组件复用 daisyUI 词汇（`card` / `btn` / `badge` / `table` / `modal` / `alert` / `input` / `select` / `checkbox` / `skeleton`），删除确认改为同款模态，不再用原生 `confirm()`。
   - 焦点环统一主色；模型表 `min-w-[760px]` + 横向滚动，窄视口不挤压 id / 展示名。
   - Tailwind/daisyUI 只参与构建，页面零运行时 JS 依赖；产物仍是单个哈希 CSS。
+- 允许 `providers` 为空：`providers: {}` 是合法配置，控制台可把 provider 删到 0 并展示空态。
+- 模型列表收进 provider 卡片详情，页面不再单独渲染「模型」区块。
 - master key 鉴权，常量时间比较。
 - `GET /health` 与 `GET /` 发现端点。
 - 单二进制交付 + systemd 运维形态。

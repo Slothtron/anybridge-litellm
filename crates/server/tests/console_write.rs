@@ -555,9 +555,9 @@ async fn missing_entities_are_404() {
 }
 
 #[tokio::test]
-async fn deleting_the_last_provider_is_rejected() {
+async fn deleting_the_last_provider_leaves_empty_config() {
     let dir = temp_dir("last");
-    let (app, _path) = writable_app(&dir);
+    let (app, path) = writable_app(&dir);
 
     let response = console(
         &app,
@@ -577,13 +577,20 @@ async fn deleting_the_last_provider_is_rejected() {
         None,
     )
     .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "不能删空 provider"
-    );
+    assert_eq!(response.status(), StatusCode::OK, "允许删空 provider");
     let body = json_body(response).await;
-    assert_eq!(body["error"]["details"][0]["path"], "providers");
+    assert_eq!(
+        body["providers"]
+            .as_array()
+            .map(|providers| providers.len()),
+        Some(0)
+    );
+
+    let yaml = std::fs::read_to_string(&path).expect("读取配置");
+    assert!(
+        yaml.contains("providers: {}"),
+        "空 provider 应写成映射：{yaml}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

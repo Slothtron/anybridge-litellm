@@ -390,11 +390,9 @@ impl Ctx {
     fn parse_providers(&mut self, root: &Mapping) -> BTreeMap<String, ProviderConfig> {
         let mut providers = BTreeMap::new();
         match get(root, "providers") {
-            None | Some(Value::Null) => self.err("providers", "必填且不能为空"),
+            // 允许空：控制台支持把 provider 删到 0，启动一份空配置也是合法状态。
+            None | Some(Value::Null) => {}
             Some(Value::Mapping(mapping)) => {
-                if mapping.is_empty() {
-                    self.err("providers", "不能为空");
-                }
                 for (key, value) in mapping {
                     match key.as_str() {
                         Some(name) => {
@@ -1367,23 +1365,26 @@ providers:
     }
 
     #[test]
-    fn empty_providers_fails() {
-        let errors = errors_of(
+    fn empty_providers_is_allowed() {
+        let outcome = load(
             r#"
 auth:
   master_key: k
 providers: {}
 "#,
-        );
-        assert_eq!(paths(&errors), vec!["providers"]);
+        )
+        .unwrap();
+        assert!(outcome.config.providers.is_empty());
 
-        let errors = errors_of(
+        // 整段省略 `providers` 也等价于空配置。
+        let outcome = load(
             r#"
 auth:
   master_key: k
 "#,
-        );
-        assert_eq!(paths(&errors), vec!["providers"]);
+        )
+        .unwrap();
+        assert!(outcome.config.providers.is_empty());
     }
 
     #[test]

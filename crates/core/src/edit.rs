@@ -563,7 +563,10 @@ providers:
             .is_empty());
 
         doc.delete_provider("openai").unwrap();
-        assert!(doc.validate().is_err(), "providers 为空应校验失败");
+        assert!(
+            doc.validate().unwrap().config.providers.is_empty(),
+            "允许把 provider 删空"
+        );
 
         let errors = doc.delete_provider("openai").unwrap_err();
         assert_eq!(paths(&errors), vec!["providers.openai"]);

@@ -341,8 +341,8 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
 - 校验完全复用启动时的加载器：错误以 `{"error":{"details":[{"path","message"}]}}` 返回并展示在表单里。
 - **`api_key` 只接受 `os.environ/VAR`**（或裸变量名）。明文密钥在进入 YAML 之前就被拒绝，
   响应里也只有 `{"kind":"env","env":"OPENAI_API_KEY"}` 这样的描述符，永远不含值。
-- 已知限制：整份重写会丢 `#` 注释与空行（键顺序保留）；provider 不支持改名（改名 = 删除 + 新建）；
-  provider 不能删空（至少保留一个）。
+- 已知限制：整份重写会丢 `#` 注释与空行（键顺序保留）；provider 不支持改名（改名 = 删除 + 新建）。
+- 允许把 provider 删空（`providers: {}` 合法），控制台会展示空态；模型列表收在对应 provider 的卡片详情内。
 
 界面统一用 **Tailwind CSS v4 + daisyUI 5**（`src/app.css` 是唯一入口，自定义 `anybridge` / `anybridge-dark` 两套 OKLCH 主题，跟随 `prefers-color-scheme`）。组件只复用 daisyUI 词汇（`card` / `btn` / `badge` / `table` / `modal` / `alert` / `input` / `select` / `checkbox` / `skeleton`），删除确认也用同一套 `<dialog>` 模态，不再调原生 `confirm()`。Tailwind/daisyUI 只在构建期生效，页面不加载任何组件库运行时脚本。
 
