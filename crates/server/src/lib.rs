@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use anybridge_litellm_core::passthrough::{allows, extract_model};
 use anybridge_litellm_core::{
-    extract_presented, verify_master_key, ApiKind, ErrorKind, GatewayConfig, GatewayError,
+    extract_presented, verify_master_key, ApiKind, CredentialRef, CredentialStore, ErrorKind,
+    GatewayConfig, GatewayError, YamlCredentialStore,
 };
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -39,9 +40,14 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 pub struct AppState {
     /// 配置存储：读走内存快照，控制台写走「原子写盘 + 热加载」。
     pub config: Arc<ConfigStore>,
+    /// 凭据存储：provider 的 `api_key` 是引用，**每次请求**重新解析。
+    pub credentials: Arc<dyn CredentialStore>,
     pub client: reqwest::Client,
     /// 控制台随机 token：只经 stderr 打印的 URL 分发，不进配置、不进日志。
+    /// 它只用于 `?token=` 一次性交换会话 cookie。
     pub console_token: String,
+    /// 会话密钥：持久化在磁盘上，重启不变，浏览器登录态靠它保持。
+    pub session: console::ConsoleSession,
 }
 
 impl AppState {
@@ -50,25 +56,41 @@ impl AppState {
         Self::with_token(config, new_token())
     }
 
-    /// 指定 token 构造（测试用，避免随机值）；配置不可写。
+    /// 指定 token 构造（测试用，避免随机值）；配置与凭据都不可写。
     pub fn with_token(config: GatewayConfig, console_token: String) -> Self {
-        Self::with_token_and_path(config, console_token, None, None)
+        Self::with_token_and_path(config, console_token, None, None, None)
     }
 
-    /// 指定 token 与可回写的配置文件路径。
+    /// 指定 token、可回写的配置文件路径与凭据文件路径。
     ///
     /// `bind_override` 是 `--bind` 的命令行覆盖值，每次热加载后重新套用。
+    /// `credentials_path = None` 表示凭据只读。
     pub fn with_token_and_path(
         config: GatewayConfig,
         console_token: String,
         config_path: Option<PathBuf>,
         bind_override: Option<String>,
+        credentials_path: Option<PathBuf>,
     ) -> Self {
         Self {
             config: Arc::new(ConfigStore::new(config, config_path, bind_override)),
+            credentials: Arc::new(YamlCredentialStore::new(credentials_path)),
             client: build_client(),
             console_token,
+            session: console::ConsoleSession::ephemeral(),
         }
+    }
+
+    /// 指定会话密钥文件（启动时读或生成）。不调用则退化为进程内随机。
+    pub fn with_session_key(mut self, path: Option<PathBuf>) -> Self {
+        self.session = console::ConsoleSession::load_or_create(path);
+        self
+    }
+
+    /// 替换凭据存储（测试与插件化装配用）。
+    pub fn with_credentials(mut self, credentials: Arc<dyn CredentialStore>) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     /// 当前配置快照。一次请求只取一次，保证同一请求内配置一致。
@@ -252,7 +274,21 @@ async fn proxy_request(
         )
     };
 
-    // 5. 拼上游 URL（保留原 query string）。
+    // 5. 解析凭据：每次请求重新解析，控制台轮换密钥后下一次请求即生效。
+    let api_key = match state.credentials.resolve(target.api_key) {
+        Some(credential) => credential.value,
+        None => {
+            return error_response(GatewayError::new(
+                ErrorKind::CredentialNotConfigured,
+                format!(
+                    "凭据 `{}` 未配置：请在控制台写入，或写进凭据文件",
+                    target.api_key
+                ),
+            ));
+        }
+    };
+
+    // 6. 拼上游 URL（保留原 query string）。
     let url = upstream_url(target.base_url, &tail, uri.query());
 
     let mut builder = state.client.request(method, &url);
@@ -269,13 +305,13 @@ async fn proxy_request(
                 .or_else(|| target.api.default_api_version())
                 .unwrap_or("2023-06-01");
             builder
-                .header("x-api-key", target.api_key)
+                .header("x-api-key", api_key)
                 .header("anthropic-version", version)
         }
-        _ => builder.header("authorization", format!("Bearer {}", target.api_key)),
+        _ => builder.header("authorization", format!("Bearer {api_key}")),
     };
 
-    // 6. 发送；超时或连接错误统一 502。
+    // 7. 发送；超时或连接错误统一 502。
     let started = Instant::now();
     let upstream = match tokio::time::timeout(target.timeout, builder.body(body).send()).await {
         Ok(Ok(response)) => response,
@@ -396,7 +432,7 @@ fn error_response(err: GatewayError) -> Response {
 struct Target<'a> {
     api: ApiKind,
     base_url: &'a str,
-    api_key: &'a str,
+    api_key: &'a CredentialRef,
     api_version: Option<&'a str>,
     timeout: Duration,
 }
@@ -490,13 +526,13 @@ providers:
   openai:
     api: completions
     base_url: https://api.openai.com/v1/
-    api_key: sk-test
+    api_key: credential/openai
     models:
       - id: gpt-4o
   anthropic:
     api: anthropic
     base_url: https://api.anthropic.com/v1
-    api_key: sk-anthropic
+    api_key: credential/anthropic
     models:
       - id: claude-sonnet
 "#,

@@ -8,10 +8,38 @@
 
 import type { ConsoleState, ModelEntry, ProviderEntry } from "./api";
 
+/** 控制台的两个视图；顶部导航切换，切视图不刷新页面。 */
+export type View = "providers" | "about";
+
 export interface Shell {
   content: HTMLElement;
   errorBar: HTMLElement;
   refreshButton: HTMLButtonElement;
+  nav: Record<View, HTMLButtonElement>;
+  /** 页面标题（服务名来自状态接口，不在前端写死）。 */
+  title: HTMLElement;
+}
+
+/** 服务名只来自状态接口；拿不到时用这个占位，避免空白标题。 */
+const FALLBACK_NAME = "anybridge-litellm";
+
+function applyServiceName(shell: Shell, state: ConsoleState): void {
+  const name =
+    typeof state.name === "string" && state.name.trim() !== ""
+      ? state.name.trim()
+      : FALLBACK_NAME;
+  shell.title.textContent = name;
+  document.title = `${name} 控制台`;
+}
+
+/** 导航项：`aria-current` 跟着视图走。 */
+export function setActiveView(shell: Shell, view: View): void {
+  for (const [name, button] of Object.entries(shell.nav) as Array<[View, HTMLButtonElement]>) {
+    const active = name === view;
+    button.setAttribute("aria-current", active ? "page" : "false");
+    button.classList.toggle("btn-active", active);
+    button.classList.toggle("btn-ghost", !active);
+  }
 }
 
 /** 控制台动作。`editable === false` 时所有写入口都不渲染。 */
@@ -191,6 +219,7 @@ function metaRow(
   label: string,
   value: string | null | undefined,
   copyable = true,
+  mono = false,
 ): HTMLElement {
   const row = el(
     "div",
@@ -203,7 +232,9 @@ function metaRow(
   } else {
     const code = el(
       "code",
-      "truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs",
+      mono
+        ? "truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs"
+        : "truncate rounded-md bg-base-200 px-1.5 py-0.5 text-xs",
       value,
     );
     code.title = value;
@@ -224,19 +255,30 @@ function apiKeyRow(provider: ProviderEntry): HTMLElement {
   row.append(el("dt", "font-mono text-[11px] text-muted", "api_key"));
   const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
   const key = provider.api_key;
-  if (key?.kind === "env" && typeof key.env === "string") {
-    const value = `os.environ/${key.env}`;
-    const code = el(
-      "code",
-      "truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs",
-      value,
-    );
-    code.title = value;
-    dd.append(code, copyButton(value, "api_key"));
-  } else if (key?.kind === "literal") {
-    dd.append(el("span", "badge badge-sm badge-error", "字面量（已隐藏）"));
-  } else {
+  const reference = typeof key?.reference === "string" ? key.reference : "";
+  if (reference === "") {
     dd.append(el("span", "text-subtle", "-"));
+    row.append(dd);
+    return row;
+  }
+
+  // 只展示引用，值永远不回到前端。
+  const code = el(
+    "code",
+    "truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs",
+    reference,
+  );
+  code.title = reference;
+  dd.append(code, copyButton(reference, "api_key"));
+  dd.append(
+    key?.configured === true
+      ? el("span", "badge badge-xs badge-success", "已配置")
+      : el("span", "badge badge-xs badge-warning", "未配置"),
+  );
+  if (typeof key?.source === "string" && key.source.trim() !== "") {
+    dd.append(
+      el("span", "whitespace-nowrap text-[11px] text-subtle", `源：${key.source}`),
+    );
   }
   row.append(dd);
   return row;
@@ -271,44 +313,58 @@ function sectionHead(title: string, action?: HTMLButtonElement): HTMLElement {
   return head;
 }
 
-function renderOverview(state: ConsoleState, providers: ProviderEntry[]): HTMLElement {
-  const section = el("section");
-  section.append(
-    el(
-      "h2",
-      "mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted",
-      "概览",
-    ),
-  );
+/** 「关于」页：服务的关键运行信息（版本、端口、路径）。 */
+export function renderAbout(shell: Shell, state: ConsoleState): void {
+  applyServiceName(shell, state);
+  const content = shell.content;
+  content.textContent = "";
 
+  const providers = Array.isArray(state.providers) ? state.providers : [];
   const modelCount = providers.reduce(
     (total, provider) => total + (provider.models?.length ?? 0),
     0,
   );
 
+  const section = el("section");
+  section.append(sectionHead("关于"));
+
+  const card = el(
+    "div",
+    "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm sm:p-6",
+  );
   const grid = el(
     "dl",
-    "m-0 grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-6",
+    "m-0 grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2 xl:grid-cols-3",
   );
-  const items: Array<[string, string, boolean]> = [
-    ["名称", textOrDash(state.name), false],
-    ["版本", textOrDash(state.version), false],
-    ["监听地址", textOrDash(state.bind), true],
-    ["路径前缀", textOrDash(state.prefix), true],
+
+  const rows: Array<[string, string | null | undefined, boolean]> = [
+    ["名称", state.name, false],
+    ["版本", state.version, false],
+    ["监听地址", state.bind, true],
+    ["端口", portOf(state.bind), true],
+    ["路径前缀", state.prefix, true],
     ["Provider 数量", formatNumber(providers.length), false],
     ["模型总数", formatNumber(modelCount), false],
+    ["配置文件", state.config_file, true],
+    ["凭据文件", state.credentials_file, true],
+    ["控制台模式", state.editable === false ? "只读" : "可编辑", false],
   ];
-  for (const [label, value, mono] of items) {
-    const item = el("div", "rounded-box border border-base-300 bg-base-100 px-3 py-2.5");
-    item.append(el("dt", "text-[11px] text-muted", label));
-    item.append(
-      el("dd", `m-0 mt-0.5 truncate text-sm font-semibold ${mono ? "font-mono" : ""}`, value),
-    );
-    grid.append(item);
+  for (const [label, value, mono] of rows) {
+    grid.append(metaRow(label, value, false, mono));
   }
 
-  section.append(grid);
-  return section;
+  card.append(grid);
+  section.append(card);
+  content.append(section);
+}
+
+/** 从 `host:port` 里取端口；取不到就原样返回。 */
+function portOf(bind: string | undefined): string | undefined {
+  if (typeof bind !== "string") {
+    return undefined;
+  }
+  const index = bind.lastIndexOf(":");
+  return index >= 0 && index < bind.length - 1 ? bind.slice(index + 1) : bind;
 }
 
 function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLElement {
@@ -317,7 +373,15 @@ function renderProviderCard(provider: ProviderEntry, actions: RowActions): HTMLE
   const body = el("div", "flex flex-col gap-4 p-4 sm:p-5");
 
   const head = el("div", "flex flex-wrap items-center gap-2");
-  head.append(el("h3", "font-mono text-sm font-semibold", textOrDash(provider.name)));
+  const displayName =
+    typeof provider.display_name === "string" && provider.display_name.trim() !== ""
+      ? provider.display_name.trim()
+      : textOrDash(provider.name);
+  head.append(el("h3", "text-sm font-semibold", displayName));
+  // 有展示名时把 id 放到旁边（路径与配置都以 id 为准）。
+  if (displayName !== provider.name) {
+    head.append(el("code", "font-mono text-[11px] text-muted", textOrDash(provider.name)));
+  }
   head.append(apiBadge(provider.api));
   head.append(
     el(
@@ -501,7 +565,11 @@ function renderModelTable(
 }
 
 /** 建立页面骨架；只调用一次。 */
-export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
+export function mountShell(
+  root: HTMLElement,
+  onRefresh: () => void,
+  onView: (view: View) => void,
+): Shell {
   root.textContent = "";
 
   const app = el("div", "min-h-dvh");
@@ -524,9 +592,8 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
     ),
   );
   const titles = el("div", "min-w-0");
-  titles.append(
-    el("h1", "truncate text-base font-semibold tracking-tight", "anybridge-litellm"),
-  );
+  const title = el("h1", "truncate text-base font-semibold tracking-tight", "");
+  titles.append(title);
   titles.append(
     el(
       "p",
@@ -546,7 +613,22 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
   refreshButton.addEventListener("click", onRefresh);
   bar.append(refreshButton);
 
-  header.append(bar);
+  const nav = el(
+    "nav",
+    "mx-auto flex max-w-7xl items-center gap-1 px-4 pb-2 sm:px-6",
+  );
+  nav.setAttribute("aria-label", "控制台视图");
+  const navButtons = {
+    providers: el("button", "btn btn-xs btn-ghost", "Provider"),
+    about: el("button", "btn btn-xs btn-ghost", "关于"),
+  } as Record<View, HTMLButtonElement>;
+  for (const [view, button] of Object.entries(navButtons) as Array<[View, HTMLButtonElement]>) {
+    button.type = "button";
+    button.addEventListener("click", () => onView(view));
+    nav.append(button);
+  }
+
+  header.append(bar, nav);
 
   // 可见性只能靠 `hidden` 工具类切换：daisyUI 的 `.alert{display:grid}` 会盖掉
   // UA 的 `[hidden]{display:none}`，只改 `hidden` 属性错误条依然可见。
@@ -559,7 +641,7 @@ export function mountShell(root: HTMLElement, onRefresh: () => void): Shell {
   app.append(header, errorBar, content);
   root.append(app);
 
-  return { content, errorBar, refreshButton };
+  return { content, errorBar, refreshButton, nav: navButtons, title };
 }
 
 export function setRefreshing(shell: Shell, busy: boolean): void {
@@ -592,18 +674,6 @@ export function renderLoading(shell: Shell): void {
   content.append(box);
 }
 
-export function renderMissingToken(shell: Shell): void {
-  const content = shell.content;
-  content.textContent = "";
-  content.append(
-    emptyState(
-      "缺少 token",
-      "用启动日志里打印的带 token 的地址打开本页面。",
-      "形如 http://127.0.0.1:4000/console/?token=…",
-    ),
-  );
-}
-
 export function renderErrorState(shell: Shell, title: string, message: string): void {
   const content = shell.content;
   content.textContent = "";
@@ -615,6 +685,7 @@ export function renderState(
   state: ConsoleState,
   actions: RowActions,
 ): void {
+  applyServiceName(shell, state);
   const content = shell.content;
   content.textContent = "";
   const providers = Array.isArray(state.providers) ? state.providers : [];
@@ -629,5 +700,5 @@ export function renderState(
     content.append(note);
   }
 
-  content.append(renderOverview(state, providers), renderProviders(providers, actions));
+  content.append(renderProviders(providers, actions));
 }

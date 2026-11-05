@@ -4,11 +4,16 @@ server:
 auth:
   master_key: os.environ/GATEWAY_MASTER_KEY
 
+# 凭据文件：密钥值单独存放，配置文件里只留 `credential/<name>` 引用。
+# 缺省路径 ~/.config/anybridge-litellm/credentials.yaml（0600）。
+# credentials:
+#   file: /path/to/credentials.yaml
+
 providers:
   openai:                              # 配置键 = 路径里的 provider 段
     api: completions                   # completions | anthropic | responses
     base_url: https://api.openai.com/v1
-    api_key: os.environ/OPENAI_API_KEY
+    api_key: credential/OPENAI_API_KEY         # 值写在凭据文件里，控制台可写入/轮换
     timeout: 600
     models:
       - id: gpt-4o
@@ -22,14 +27,14 @@ providers:
   openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
     api: responses
     base_url: https://api.openai.com/v1
-    api_key: os.environ/OPENAI_API_KEY
+    api_key: credential/OPENAI_API_KEY
     timeout: 600
     models:
       - id: gpt-5.6-luna
   anthropic:
     api: anthropic
     base_url: https://api.anthropic.com/v1
-    api_key: os.environ/ANTHROPIC_API_KEY
+    api_key: credential/ANTHROPIC_API_KEY
     timeout: 600
     models:
       - id: claude-sonnet-4-20250514
@@ -37,7 +42,7 @@ providers:
   local:
     api: completions
     base_url: http://127.0.0.1:11434/v1
-    api_key: not-needed
+    api_key: credential/LOCAL_API_KEY
     timeout: 300
     models:
       - id: qwen3:8b

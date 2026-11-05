@@ -5,7 +5,7 @@
 //!
 //! 关键约束：
 //!
-//! - **只写 `os.environ/VAR` 引用**：控制台永不接受明文密钥，也不把展开后的值写回文件。
+//! - **只写 `credential/<name>` 引用**：控制台永不接受明文密钥，密钥值只进凭据文件。
 //! - 以原映射为底逐字段覆盖，因此未知键（将来版本新增的字段）原样保留。
 //! - `#` 注释与空行会在 `serde_yaml` 重写时丢失（已知限制，设计 §3.5）。
 //! - 不做部分校验：调用方拿到文档后必须走 [`Document::validate`]，通过才可落盘。
@@ -13,6 +13,7 @@
 use serde_yaml::{Mapping, Value};
 
 use crate::config::{load_from_str, ConfigErrors, LoadOptions, LoadOutcome};
+use crate::credential::{credential_ref_for, CredentialRef};
 
 /// 控制台写接口接受的 provider 草稿。
 ///
@@ -20,7 +21,10 @@ use crate::config::{load_from_str, ConfigErrors, LoadOptions, LoadOutcome};
 /// `None` 或空串表示「更新时保留原值」，新建时视为必填缺失。
 #[derive(Debug, Clone, Default)]
 pub struct ProviderDraft {
+    /// provider id（配置键、路径段）。
     pub name: String,
+    /// 可选展示名；`None`/空表示「界面回退显示 id」。
+    pub display_name: Option<String>,
     pub api: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
@@ -102,21 +106,22 @@ impl Document {
         };
 
         insert_str(&mut mapping, "api", &draft.api);
+        set_optional_str(
+            &mut mapping,
+            "name",
+            draft.display_name.as_deref().map(str::trim),
+        );
         insert_str(&mut mapping, "base_url", &draft.base_url);
 
-        match draft.api_key_env.as_deref().map(str::trim) {
-            Some(raw) if !raw.is_empty() => {
-                let var = normalize_env_ref(raw).ok_or_else(|| {
-                    ConfigErrors::single(
-                        format!("{path}.api_key"),
-                        "只接受 `os.environ/VAR` 形式的环境变量引用，不接受明文密钥",
-                    )
-                })?;
-                insert_str(&mut mapping, "api_key", &format!("os.environ/{var}"));
+        // 凭据引用由 provider id 派生（`upper(id)` + `_API_KEY`），不接受手填。
+        // 显式传了 api_key 时仍然校验语法，避免静默接受非法引用。
+        if let Some(raw) = draft.api_key_env.as_deref().map(str::trim) {
+            if !raw.is_empty() {
+                CredentialRef::parse_at(raw, &format!("{path}.api_key"))?;
             }
-            // 更新：保留原值；新建：必填缺失（交给校验器给出统一报错）。
-            _ => {}
         }
+        let derived = credential_ref_for(&name)?;
+        insert_str(&mut mapping, "api_key", &derived.to_string());
 
         set_optional_u64(&mut mapping, "timeout", draft.timeout);
         set_optional_str(&mut mapping, "api_version", draft.api_version.as_deref());
@@ -221,26 +226,9 @@ impl Document {
         Ok(())
     }
 
-    /// 所有 provider 的 `api_key` 形态（只给变量名，永远不含值）。
-    pub fn api_key_kinds(&self) -> std::collections::BTreeMap<String, ApiKeyKind> {
-        let mut kinds = std::collections::BTreeMap::new();
-        let Some(Value::Mapping(providers)) = self.root.get("providers") else {
-            return kinds;
-        };
-        for (key, value) in providers {
-            let Some(name) = key.as_str() else { continue };
-            let raw = value.get("api_key").and_then(Value::as_str);
-            let kind = match raw {
-                Some(raw) => match normalize_env_ref(raw) {
-                    Some(var) => ApiKeyKind::Env(var.to_string()),
-                    None if raw.trim().is_empty() => ApiKeyKind::Missing,
-                    None => ApiKeyKind::Literal,
-                },
-                None => ApiKeyKind::Missing,
-            };
-            kinds.insert(name.to_string(), kind);
-        }
-        kinds
+    /// 所有 provider 的凭据引用（只给引用名，永远不含值）。
+    pub fn api_key_refs(&self) -> std::collections::BTreeMap<String, CredentialRef> {
+        api_key_refs_of(&self.root)
     }
 
     fn providers_mut(&mut self) -> &mut Mapping {
@@ -270,6 +258,41 @@ impl Document {
         }
     }
 
+    /// 用一份 id 列表**同步**模型目录：保序、去重，保留已有条目的其余字段。
+    ///
+    /// 控制台的「模型目录」一次提交整份列表，这里只增删差异，
+    /// 因此手动填过的 `context_window` 等字段不会被覆盖。
+    pub fn sync_models(&mut self, provider: &str, ids: &[String]) -> Result<(), ConfigErrors> {
+        let mut wanted: Vec<String> = Vec::new();
+        for id in ids {
+            let id = id.trim();
+            if !id.is_empty() && !wanted.iter().any(|seen| seen == id) {
+                wanted.push(id.to_string());
+            }
+        }
+
+        let mut models = self.models_of(provider)?;
+        models.retain(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| wanted.iter().any(|keep| keep == id))
+        });
+        for id in &wanted {
+            let present = models
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()));
+            if present {
+                continue;
+            }
+            let mut mapping = Mapping::new();
+            insert_str(&mut mapping, "id", id);
+            models.push(Value::Mapping(mapping));
+        }
+
+        self.replace_models(provider, models);
+        Ok(())
+    }
+
     fn replace_models(&mut self, provider: &str, models: Vec<Value>) {
         let providers = self.providers_mut();
         let entry = match providers.get_mut(provider) {
@@ -289,29 +312,24 @@ impl Document {
     }
 }
 
-/// `api_key` 在配置里的三种形态。`Env` 只携带变量名。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApiKeyKind {
-    Env(String),
-    Literal,
-    Missing,
-}
-
-/// 归一化环境变量引用：接受 `os.environ/VAR` 或裸 `VAR`。
+/// 从配置文档里读出每个 provider 的凭据引用。
 ///
-/// 返回 `None` 表示不是合法的环境变量名（调用方据此拒绝明文密钥）。
-pub fn normalize_env_ref(raw: &str) -> Option<&str> {
-    let raw = raw.trim();
-    let var = raw.strip_prefix("os.environ/").unwrap_or(raw);
-    let mut chars = var.chars();
-    let first = chars.next()?;
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return None;
+/// 只做语法层面的读取（不解析值），供控制台展示「引用的是哪条凭据」。
+pub fn api_key_refs_of(document: &Mapping) -> std::collections::BTreeMap<String, CredentialRef> {
+    let mut refs = std::collections::BTreeMap::new();
+    let Some(Value::Mapping(providers)) = document.get("providers") else {
+        return refs;
+    };
+    for (key, value) in providers {
+        let Some(name) = key.as_str() else { continue };
+        let raw = value.get("api_key").and_then(Value::as_str);
+        if let Some(reference) =
+            raw.and_then(|raw| CredentialRef::parse_at(raw, "providers.api_key").ok())
+        {
+            refs.insert(name.to_string(), reference);
+        }
     }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
-    }
-    Some(var)
+    refs
 }
 
 fn insert_str(mapping: &mut Mapping, key: &str, value: &str) {
@@ -374,23 +392,23 @@ providers:
   openai:
     api: completions
     base_url: https://api.openai.com/v1
-    api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI
+    api_key: credential/openai
     models:
       - id: gpt-4o
 "#;
 
     fn document() -> Document {
         std::env::set_var("ANYBRIDGE_EDIT_TEST_MASTER", "master");
-        std::env::set_var("ANYBRIDGE_EDIT_TEST_OPENAI", "sk-openai");
         Document::parse(BASE).expect("基线文档应可解析")
     }
 
     fn provider_draft(name: &str) -> ProviderDraft {
         ProviderDraft {
             name: name.to_string(),
+            display_name: Some("本地模型".into()),
             api: "completions".into(),
             base_url: "http://127.0.0.1:11434/v1".into(),
-            api_key_env: Some("os.environ/ANYBRIDGE_EDIT_TEST_OPENAI".into()),
+            api_key_env: Some("credential/openai".into()),
             timeout: Some(30),
             api_version: None,
         }
@@ -408,29 +426,24 @@ providers:
     }
 
     #[test]
-    fn create_provider_writes_env_reference_verbatim() {
+    fn create_provider_writes_credential_reference_verbatim() {
         let mut doc = document();
         doc.upsert_provider(&provider_draft("local"), true)
             .expect("新建 provider 应成功");
         let yaml = doc.to_yaml().unwrap();
-        assert!(
-            yaml.contains("api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI"),
-            "{yaml}"
-        );
-        assert!(!yaml.contains("sk-openai"), "不得把展开后的密钥写回文件");
+        assert!(yaml.contains("api_key: credential/openai"), "{yaml}");
+        assert!(!yaml.contains("sk-openai"), "不得把密钥写回配置文件");
         doc.validate().expect("文档应通过校验");
     }
 
     #[test]
-    fn bare_env_name_is_normalized() {
+    fn legacy_environment_reference_is_rejected() {
         let mut doc = document();
         let mut draft = provider_draft("local");
-        draft.api_key_env = Some("ANYBRIDGE_EDIT_TEST_OPENAI".into());
-        doc.upsert_provider(&draft, true).unwrap();
-        assert!(doc
-            .to_yaml()
-            .unwrap()
-            .contains("api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI"));
+        draft.api_key_env = Some("os.environ/ANYBRIDGE_EDIT_TEST_OPENAI".into());
+        let errors = doc.upsert_provider(&draft, true).unwrap_err();
+        assert_eq!(paths(&errors), vec!["providers.local.api_key"]);
+        assert!(errors.0[0].message.contains("credential/"));
     }
 
     #[test]
@@ -440,7 +453,7 @@ providers:
         draft.api_key_env = Some("sk-live-plaintext".into());
         let errors = doc.upsert_provider(&draft, true).unwrap_err();
         assert_eq!(paths(&errors), vec!["providers.local.api_key"]);
-        assert!(errors.0[0].message.contains("明文"));
+        assert!(errors.0[0].message.contains("credential/"));
     }
 
     #[test]
@@ -453,15 +466,28 @@ providers:
     }
 
     #[test]
-    fn update_preserves_api_key_when_omitted() {
+    fn api_key_reference_is_derived_from_provider_id() {
         let mut doc = document();
         let mut draft = provider_draft("openai");
         draft.api_key_env = None;
         draft.timeout = Some(120);
         doc.upsert_provider(&draft, false).unwrap();
         let yaml = doc.to_yaml().unwrap();
-        assert!(yaml.contains("api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI"));
+        assert!(
+            yaml.contains("api_key: credential/OPENAI_API_KEY"),
+            "{yaml}"
+        );
         assert!(yaml.contains("timeout: 120"), "{yaml}");
+
+        // 连字符归一成下划线。
+        let mut draft = provider_draft("openai-responses");
+        draft.api_key_env = None;
+        doc.upsert_provider(&draft, true).unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        assert!(
+            yaml.contains("api_key: credential/OPENAI_RESPONSES_API_KEY"),
+            "{yaml}"
+        );
     }
 
     #[test]
@@ -487,7 +513,7 @@ providers:
   openai:
     api: completions
     base_url: https://api.openai.com/v1
-    api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI
+    api_key: credential/openai
     region: us-east
     models:
       - id: gpt-4o
@@ -614,19 +640,59 @@ providers:
     }
 
     #[test]
-    fn unset_environment_variable_fails_validation() {
-        let mut doc = document();
-        let mut draft = provider_draft("local");
-        draft.api_key_env = Some("os.environ/ANYBRIDGE_EDIT_TEST_UNSET".into());
-        std::env::remove_var("ANYBRIDGE_EDIT_TEST_UNSET");
-        doc.upsert_provider(&draft, true).unwrap();
+    fn legacy_reference_in_document_fails_validation() {
+        // 手工编辑留下的旧写法：整份文档在校验阶段就被拒，不会热加载成半份配置。
+        let doc = Document::parse(
+            r#"
+auth:
+  master_key: k
+providers:
+  local:
+    api: completions
+    base_url: http://127.0.0.1:11434/v1
+    api_key: os.environ/ANYBRIDGE_EDIT_TEST_UNSET
+    models: []
+"#,
+        )
+        .unwrap();
         let errors = doc.validate().unwrap_err();
         assert_eq!(paths(&errors), vec!["providers.local.api_key"]);
-        assert!(errors.0[0].message.contains("未设置"));
+        assert!(errors.0[0].message.contains("credential/"));
     }
 
     #[test]
-    fn api_key_kinds_never_expose_values() {
+    fn sync_models_keeps_metadata_and_order() {
+        let mut doc = document();
+        // 先给 gpt-4o 加上元数据，再整份同步：保留字段、按新列表增删。
+        let mut draft = model_draft("gpt-4o");
+        draft.context_window = Some(128_000);
+        doc.upsert_model("openai", Some("gpt-4o"), &draft).unwrap();
+
+        doc.sync_models(
+            "openai",
+            &["gpt-4o".into(), "claude-sonnet".into(), "gpt-4o".into()],
+        )
+        .unwrap();
+
+        let yaml = doc.to_yaml().unwrap();
+        assert_eq!(yaml.matches("- id:").count(), 2, "重复 id 应去重：{yaml}");
+        assert!(yaml.contains("gpt-4o"), "{yaml}");
+        assert!(yaml.contains("claude-sonnet"), "{yaml}");
+        assert!(
+            yaml.contains("context_window: 128000"),
+            "已有条目的其它字段不能丢：{yaml}"
+        );
+
+        // 再同步成只剩一条：多余的被移除。
+        doc.sync_models("openai", &["claude-sonnet".into()])
+            .unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        assert!(!yaml.contains("gpt-4o"), "{yaml}");
+        assert!(yaml.contains("claude-sonnet"), "{yaml}");
+    }
+
+    #[test]
+    fn api_key_refs_never_expose_values() {
         let doc = Document::parse(
             r#"
 auth:
@@ -635,11 +701,11 @@ providers:
   a:
     api: completions
     base_url: https://example.com/v1
-    api_key: os.environ/SOME_VAR
+    api_key: credential/some_var
   b:
     api: completions
     base_url: https://example.com/v1
-    api_key: literal-secret
+    api_key: credential/other
   c:
     api: completions
     base_url: https://example.com/v1
@@ -647,12 +713,13 @@ providers:
 "#,
         )
         .unwrap();
-        let kinds = doc.api_key_kinds();
-        assert_eq!(kinds["a"], ApiKeyKind::Env("SOME_VAR".into()));
-        assert_eq!(kinds["b"], ApiKeyKind::Literal);
-        assert_eq!(kinds["c"], ApiKeyKind::Missing);
-        let rendered = format!("{kinds:?}");
-        assert!(!rendered.contains("literal-secret"));
+        let refs = doc.api_key_refs();
+        assert_eq!(refs["a"].name(), "some_var");
+        assert_eq!(refs["b"].to_string(), "credential/other");
+        // 空值不是合法引用，不进入表；也永远没有值可泄露。
+        assert!(!refs.contains_key("c"));
+        let rendered = format!("{refs:?}");
+        assert!(!rendered.contains("sk-"));
     }
 
     #[test]
@@ -667,7 +734,7 @@ providers:
   openai:  # 行尾注释
     api: completions
     base_url: https://example.com/v1
-    api_key: os.environ/ANYBRIDGE_EDIT_TEST_OPENAI
+    api_key: credential/openai
     models:
       - id: gpt-4o
 "#,
@@ -680,12 +747,31 @@ providers:
     }
 
     #[test]
-    fn normalize_env_ref_accepts_only_identifiers() {
-        assert_eq!(normalize_env_ref("os.environ/FOO"), Some("FOO"));
-        assert_eq!(normalize_env_ref("FOO_BAR1"), Some("FOO_BAR1"));
-        assert_eq!(normalize_env_ref("_x"), Some("_x"));
-        for bad in ["sk-secret", "1FOO", "", "FOO-BAR", "os.environ/", "a b"] {
-            assert_eq!(normalize_env_ref(bad), None, "{bad:?}");
+    fn provider_writes_display_name_and_derived_credential() {
+        let mut doc = Document::parse(
+            r#"
+auth:
+  master_key: k
+providers: {}
+"#,
+        )
+        .unwrap();
+        let mut draft = provider_draft("openai");
+        draft.display_name = Some("OpenAI 官方".into());
+        doc.upsert_provider(&draft, true).unwrap();
+        let yaml = doc.to_yaml().unwrap();
+        assert!(yaml.contains("name: OpenAI 官方"), "{yaml}");
+        assert!(
+            yaml.contains("api_key: credential/OPENAI_API_KEY"),
+            "{yaml}"
+        );
+
+        // 显式传非法引用仍然被拒，且错误指向 api_key 字段。
+        for bad in ["os.environ/OPENAI_API_KEY", "sk-live-plaintext"] {
+            let mut draft = provider_draft("local");
+            draft.api_key_env = Some(bad.into());
+            let errors = doc.upsert_provider(&draft, true).unwrap_err();
+            assert_eq!(paths(&errors), vec!["providers.local.api_key"]);
         }
     }
 }

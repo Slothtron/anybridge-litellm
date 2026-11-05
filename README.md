@@ -56,11 +56,16 @@ server:
 auth:
   master_key: os.environ/GATEWAY_MASTER_KEY
 
+# 凭据文件：密钥值单独存放，配置文件里只留 `credential/<name>` 引用。
+# 缺省路径 ~/.config/anybridge-litellm/credentials.yaml（0600）。
+# credentials:
+#   file: /path/to/credentials.yaml
+
 providers:
   openai:                              # 配置键 = 路径里的 provider 段
     api: completions                   # completions | anthropic | responses
     base_url: https://api.openai.com/v1
-    api_key: os.environ/OPENAI_API_KEY
+    api_key: credential/OPENAI_API_KEY
     timeout: 600
     models:
       - id: gpt-4o
@@ -75,7 +80,7 @@ providers:
   openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
     api: responses
     base_url: https://api.openai.com/v1
-    api_key: os.environ/OPENAI_API_KEY
+    api_key: credential/OPENAI_API_KEY
     timeout: 600
     models:
       - id: gpt-5.6-luna
@@ -83,7 +88,7 @@ providers:
   anthropic:
     api: anthropic
     base_url: https://api.anthropic.com/v1
-    api_key: os.environ/ANTHROPIC_API_KEY
+    api_key: credential/ANTHROPIC_API_KEY
     timeout: 600
     models:
       - id: claude-sonnet-4-20250514
@@ -92,7 +97,7 @@ providers:
   local:
     api: completions
     base_url: http://127.0.0.1:11434/v1
-    api_key: not-needed
+    api_key: credential/LOCAL_API_KEY
     timeout: 300
     models:
       - id: qwen3:8b
@@ -104,14 +109,16 @@ providers:
 |---|---|---|
 | `server.bind` | 是 | 监听地址，形如 `127.0.0.1:4000` |
 | `auth.master_key` | 是 | 客户端鉴权用的 master key，支持字面量与 `os.environ/VAR` |
+| `credentials.file` | 否 | 凭据文件路径；缺省 `$XDG_CONFIG_HOME/anybridge-litellm/credentials.yaml`（退回 `~/.config/...`） |
 
 ### provider 级字段
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `api` | 是 | 协议声明，取值仅 `completions` / `anthropic` / `responses` |
+| `name` | 否 | provider 展示名；为空时界面回退显示 provider id |
 | `base_url` | 是 | 该协议的版本根，`{tail}` 原样拼在其后 |
-| `api_key` | 是 | 上游凭据，支持字面量与 `os.environ/VAR` |
+| `api_key` | 是 | 上游凭据**引用**；控制台按 `upper(provider id)` + `_API_KEY` 派生（`openai-responses` → `credential/OPENAI_RESPONSES_API_KEY`），值写在凭据文件里 |
 | `api_version` | 否 | 仅 `completions` / `responses` 使用（Azure 场景）；`anthropic` 的版本头缺省 `2023-06-01` |
 | `timeout` | 否 | 上游超时（秒），同时用作首字节与整体空闲超时 |
 | `models` | 是 | 模型列表，见下 |
@@ -161,7 +168,8 @@ providers:
 
 ### 其它规则
 
-- `api_key` / `master_key` 支持字面量与 `os.environ/VAR`；**不接受** Cookie / OAuth token 形态。
+- `api_key` 是 `credential/<name>` 引用，值由凭据存储按请求解析；`master_key` 支持字面量与 `os.environ/VAR`。
+- 旧写法（`api_key: os.environ/VAR` 或裸变量名）会在加载时报错并提示迁移到 `credential/<name>`。
 - 未知键默认 warn 并忽略；`--strict-config` 下启动失败。
 - 非法配置启动即失败，并报出字段路径。
 
@@ -328,9 +336,14 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
 
 编译期内嵌的单页控制台，挂在 `/console/`，是**配置编辑器**（Provider 与模型的增删改）：
 
-- 启动时生成 32 位随机 token，只打印一次：`console: http://127.0.0.1:4000/console/?token=<token>`。
-- 前端从 `?token=` 取到后写 `sessionStorage` 并用 `history.replaceState` 从地址栏抹掉。
-- 所有 `/console/api/*` 都必须带 `X-Console-Token`；页面与静态资源不需要（token 在 URL 里）。
+- 两个视图：**Provider**（配置编辑）与**关于**（版本、端口、路径、provider/模型数量、只读状态），顶部导航切换，切视图不刷新页面。
+- 启动时生成 32 位随机 **launch token**，只打印一次：`console: http://127.0.0.1:4000/console/?token=<token>`。
+- launch token 只做**一次性交换**：`GET /console/?token=<token>` 校验通过后 `303 → ./` 并下发
+  `Set-Cookie: anybridge-console=<secret>; HttpOnly; SameSite=Strict; Path=/`（会话级，关浏览器失效）。
+  地址栏里的 token 到此为止，之后浏览器只带 cookie。
+- cookie 的签名密钥持久化在 `~/.config/anybridge-litellm/console-session.key`（`0600`），
+  **所以重启服务不会让已打开的控制台掉登录态**。
+- `/console/api/*` 认 cookie，也认 `X-Console-Token: <launch token>` 头（给 curl / 脚本用）。
 - 只接受回环 `Host`（`127.0.0.1` / `localhost` / `[::1]`），`Origin` 若存在必须同源，否则 403。
 - 写接口额外要求 `Content-Type: application/json`，挡住跨站简单表单。
 
@@ -339,12 +352,37 @@ RSS 用例只在 Linux 上跑，其它平台自动跳过。
 - 写盘是「同目录临时文件 + `fsync` + `rename`」，权限强制 `0600`；校验不过**不落盘**。
 - 每次写之前重新从磁盘读一遍，因此外部手工编辑也会被吸收。
 - 校验完全复用启动时的加载器：错误以 `{"error":{"details":[{"path","message"}]}}` 返回并展示在表单里。
-- **`api_key` 只接受 `os.environ/VAR`**（或裸变量名）。明文密钥在进入 YAML 之前就被拒绝，
-  响应里也只有 `{"kind":"env","env":"OPENAI_API_KEY"}` 这样的描述符，永远不含值。
+- **`api_key` 只接受 `credential/<name>` 引用**。密钥值走独立的 `PUT /console/api/credentials/{name}`，
+  写进凭据文件（`0600`，原子写盘）后立刻生效；配置响应里只有
+  `{"kind":"credential","name":..,"configured":true,"source":"file","writable":true}`，永远不含值。
+- 凭据未配置时，转发请求返回 `502 credential_not_configured`，不会带着空 key 打上游。
+- **Provider 对话框**（版式参考 DSH Web 的「自定义模型 API」）：单列表单 + 顶部两个 tab。
+  「第三方模型提供商」是预设（OpenAI / Anthropic / OpenAI Responses / 本地 Ollama），选中即填地址与协议；
+  「自定义模型 API」填 Provider ID、显示名、API 地址、协议、API 密钥。
+- **模型目录**在对话框内：`获取可用模型` 带着刚填的地址与密钥请求 `{base_url}/models`
+  （新建时走 `POST /console/api/upstream-models` 探活，编辑时走 `GET .../providers/{provider}/upstream-models`），
+  也可以 `+ 添加模型` 手填 ID；保存时用 `PUT /console/api/providers/{provider}/models` **整份同步**，
+  只增删差异、保留已有条目的其它字段。
+- 提交是三步串行：写 provider → 写凭据 → 同步模型目录；任何一步失败都停在对话框里并说明是哪一步。
 - 已知限制：整份重写会丢 `#` 注释与空行（键顺序保留）；provider 不支持改名（改名 = 删除 + 新建）。
 - 允许把 provider 删空（`providers: {}` 合法），控制台会展示空态；模型列表收在对应 provider 的卡片详情内。
 
 界面统一用 **Tailwind CSS v4 + daisyUI 5**（`src/app.css` 是唯一入口，自定义 `anybridge` / `anybridge-dark` 两套 OKLCH 主题，跟随 `prefers-color-scheme`）。组件只复用 daisyUI 词汇（`card` / `btn` / `badge` / `table` / `modal` / `alert` / `input` / `select` / `checkbox` / `skeleton`），删除确认也用同一套 `<dialog>` 模态，不再调原生 `confirm()`。Tailwind/daisyUI 只在构建期生效，页面不加载任何组件库运行时脚本。
+
+视觉验收依据见 [docs/ui-design.md](docs/ui-design.md)：四条硬约束（字号四档 / 每页一个主操作 / 正文对比度 ≥ 4.5:1 / 彩色元素 ≤ 2）、主题令牌与三层门禁。
+
+### 凭据（`crates/core/src/credential.rs`）
+
+密钥与配置彻底分开，参考 dsh 的 credential seam：
+
+- 配置文件里只出现**引用** `credential/<name>`；`<name>` 匹配 `^[A-Za-z_][A-Za-z0-9_]*$`，最长 64 字节。
+- 值由 `CredentialStore` 提供，**每次请求重新解析一次**（`resolve`），所以控制台轮换密钥后下一次请求就生效，不用重启。
+- 本期实现只有 `YamlCredentialStore`：`credentials.yaml` 里的 `credentials` 映射，权限 `0600`，
+  写盘是「同目录临时文件 + `fsync` + `rename`」；文件不存在等同于「全部未配置」。
+- `CredentialStore` 是插拔点：以后接 keyring / Vault / 配置中心，只需新增实现，`server` 与 `console` 不动。
+- 控制台接口：`GET /console/api/credentials` 列表、`PUT /console/api/credentials/{name}` 写入/轮换、
+  `DELETE /console/api/credentials/{name}` 删除；三者都只回 `{name, reference, configured, source, writable}`。
+- 只读模式（未显式 `--config`）下凭据存储也不可写，写接口返回 `409 read_only`。
 
 构建链：`apps/ui`（Vite + TS + Tailwind + daisyUI）→ `dist/` → `rust-embed` 编进 `crates/server`。
 `crates/server/build.rs` **只校验不编排**：release 构建缺产物或只有占位页直接失败；debug 构建会生成占位页，保证不装 Node 也能跑 Rust 测试。
@@ -370,4 +408,5 @@ unit 的关键约束：`ExecStart` 用绝对路径（`%h/.local/bin/`）并显�
 - 默认只绑定 `127.0.0.1`，对外暴露需自行决定（反代 / 防火墙）。
 - master key 使用**常量时间比较**。
 - 上游 key 只来自配置或环境变量；**不回显、不进日志**。
-- 仓库内不放真实凭据；提交前确认示例配置里全是假值（`sk-xxxx`、`os.environ/...`）。
+- 仓库内不放真实凭据；提交前确认示例配置里全是假值（`sk-xxxx`、`credential/<name>`）。
+- 凭据文件与配置文件分开：轮换密钥不必改配置，`credentials.yaml` 独立备份/权限管理。

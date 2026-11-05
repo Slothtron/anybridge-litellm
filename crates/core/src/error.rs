@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-/// 七种稳定错误类别，对应设计文档 §8。
+/// 八种稳定错误类别，对应设计文档 §8。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     AuthError,
@@ -11,6 +11,8 @@ pub enum ErrorKind {
     ApiMismatch,
     ModelNotFound,
     InvalidRequest,
+    /// provider 引用的凭据还没写进凭据文件。
+    CredentialNotConfigured,
     UpstreamError,
 }
 
@@ -24,6 +26,7 @@ impl ErrorKind {
             ErrorKind::ApiMismatch => "api_mismatch",
             ErrorKind::ModelNotFound => "model_not_found",
             ErrorKind::InvalidRequest => "invalid_request",
+            ErrorKind::CredentialNotConfigured => "credential_not_configured",
             ErrorKind::UpstreamError => "upstream_error",
         }
     }
@@ -37,6 +40,7 @@ impl ErrorKind {
             | ErrorKind::ApiMismatch
             | ErrorKind::ModelNotFound => 404,
             ErrorKind::InvalidRequest => 400,
+            ErrorKind::CredentialNotConfigured => 502,
             ErrorKind::UpstreamError => 502,
         }
     }
@@ -113,6 +117,11 @@ mod tests {
             (ErrorKind::ApiMismatch, 404, "api_mismatch"),
             (ErrorKind::ModelNotFound, 404, "model_not_found"),
             (ErrorKind::InvalidRequest, 400, "invalid_request"),
+            (
+                ErrorKind::CredentialNotConfigured,
+                502,
+                "credential_not_configured",
+            ),
             (ErrorKind::UpstreamError, 502, "upstream_error"),
         ];
         for (kind, status, name) in table {

@@ -6,11 +6,12 @@
 //! `std::env::set_var` 注入假值。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_yaml::{Mapping, Value};
 
+use crate::credential::CredentialRef;
 use crate::domain::{ApiKind, Modality, ModelEntry, ModelRoute, ProviderConfig};
 use crate::error::{ErrorKind, GatewayError};
 
@@ -20,11 +21,13 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:4000";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 const RESERVED_PROVIDER_NAMES: [&str; 2] = ["v1", "llmproxy"];
 
-const ROOT_KEYS: [&str; 3] = ["server", "auth", "providers"];
+const ROOT_KEYS: [&str; 4] = ["server", "auth", "credentials", "providers"];
 const SERVER_KEYS: [&str; 1] = ["bind"];
 const AUTH_KEYS: [&str; 1] = ["master_key"];
-const PROVIDER_KEYS: [&str; 6] = [
+const CREDENTIALS_KEYS: [&str; 1] = ["file"];
+const PROVIDER_KEYS: [&str; 7] = [
     "api",
+    "name",
     "base_url",
     "api_key",
     "timeout",
@@ -64,10 +67,18 @@ impl std::fmt::Debug for AuthConfig {
     }
 }
 
+/// 凭据文件位置。缺省由 CLI 落到 `~/.config/anybridge-litellm/credentials.yaml`。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialsConfig {
+    /// `credentials.file`；`None` 表示用默认路径。
+    pub file: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub server: ServerConfig,
     pub auth: AuthConfig,
+    pub credentials: CredentialsConfig,
     pub providers: BTreeMap<String, ProviderConfig>,
 }
 
@@ -337,13 +348,35 @@ impl Ctx {
 
         let bind = self.parse_server(root);
         let master_key = self.parse_auth(root);
+        let credentials = self.parse_credentials(root);
         let providers = self.parse_providers(root);
 
         Some(GatewayConfig {
             server: ServerConfig { bind },
             auth: AuthConfig { master_key },
+            credentials,
             providers,
         })
+    }
+
+    /// `credentials.file`：只做「是不是非空字符串」的检查，路径解析留给 CLI。
+    fn parse_credentials(&mut self, root: &Mapping) -> CredentialsConfig {
+        let mut config = CredentialsConfig::default();
+        match get(root, "credentials") {
+            None | Some(Value::Null) => {}
+            Some(Value::Mapping(mapping)) => {
+                self.check_keys(mapping, "credentials", &CREDENTIALS_KEYS);
+                if let Some(value) = self.optional_str(mapping, "file", "credentials") {
+                    if value.trim().is_empty() {
+                        self.err("credentials.file", "不能为空");
+                    } else {
+                        config.file = Some(PathBuf::from(value));
+                    }
+                }
+            }
+            Some(_) => self.err("credentials", "必须是映射"),
+        }
+        config
     }
 
     fn parse_server(&mut self, root: &Mapping) -> String {
@@ -428,9 +461,15 @@ impl Ctx {
         self.check_keys(mapping, &base, &PROVIDER_KEYS);
 
         let api = self.parse_api(mapping, &base);
+        let display_name = self.optional_str(mapping, "name", &base);
         let base_url = self.parse_base_url(mapping, &base);
+        // `api_key` 只接受 `credential/<name>` 引用；值由凭据存储按请求解析。
         let api_key = match self.required_str(mapping, "api_key", &base) {
-            Some(raw) => self.expand_secret(&raw, &format!("{base}.api_key")),
+            Some(raw) => CredentialRef::parse_at(&raw, &format!("{base}.api_key"))
+                .map_err(|errors| {
+                    self.errors.extend(errors.0);
+                })
+                .ok(),
             None => None,
         };
         let timeout = self
@@ -444,6 +483,7 @@ impl Ctx {
 
         Some(ProviderConfig {
             api: api?,
+            name: display_name,
             base_url: base_url?,
             api_key: api_key?,
             api_version,
@@ -834,25 +874,15 @@ mod tests {
     fn set_example_env() {
         // Rust 2021 下 set_var 是安全函数。
         std::env::set_var("ANYBRIDGE_TEST_MASTER_KEY", "test-master-key");
-        std::env::set_var("ANYBRIDGE_TEST_OPENAI_KEY", "sk-openai");
-        std::env::set_var("ANYBRIDGE_TEST_ANTHROPIC_KEY", "sk-anthropic");
     }
 
     fn example_with_env() -> String {
         set_example_env();
-        EXAMPLE
-            .replace(
-                "os.environ/GATEWAY_MASTER_KEY",
-                "os.environ/ANYBRIDGE_TEST_MASTER_KEY",
-            )
-            .replace(
-                "os.environ/OPENAI_API_KEY",
-                "os.environ/ANYBRIDGE_TEST_OPENAI_KEY",
-            )
-            .replace(
-                "os.environ/ANTHROPIC_API_KEY",
-                "os.environ/ANYBRIDGE_TEST_ANTHROPIC_KEY",
-            )
+        // `api_key` 现在是 `credential/<name>` 引用，不再展开环境变量。
+        EXAMPLE.replace(
+            "os.environ/GATEWAY_MASTER_KEY",
+            "os.environ/ANYBRIDGE_TEST_MASTER_KEY",
+        )
     }
 
     const MINIMAL: &str = r#"
@@ -864,7 +894,7 @@ providers:
   openai:
     api: completions
     base_url: https://api.openai.com/v1/
-    api_key: sk-test
+    api_key: credential/test_key
     models:
       - id: gpt-4o
 "#;
@@ -884,7 +914,7 @@ providers:
         let openai = config.providers.get("openai").unwrap();
         assert_eq!(openai.api, ApiKind::Completions);
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.api_key, "sk-openai");
+        assert_eq!(openai.api_key.to_string(), "credential/OPENAI_API_KEY");
         assert_eq!(openai.timeout, Duration::from_secs(600));
         let model = &openai.models[0];
         assert_eq!(model.id, "gpt-4o");
@@ -917,7 +947,7 @@ providers:
         assert_eq!(route.api, ApiKind::Completions);
         assert_eq!(route.model.id, "gpt-4o");
         assert_eq!(route.base_url, "https://api.openai.com/v1");
-        assert_eq!(route.api_key, "sk-test");
+        assert_eq!(route.api_key.to_string(), "credential/test_key");
         assert_eq!(route.api_version, None);
         assert_eq!(route.timeout, Duration::from_secs(600));
 
@@ -1033,7 +1063,7 @@ providers:
         let config = load(&example_with_env()).unwrap().config;
 
         let discovery = config.discovery("1.2.3");
-        assert_eq!(discovery["name"], "anybridge-litellm");
+        assert_eq!(discovery["name"], GATEWAY_NAME);
         assert_eq!(discovery["version"], "1.2.3");
         let providers = discovery["providers"].as_array().unwrap();
         assert_eq!(providers.len(), 4);
@@ -1071,7 +1101,7 @@ providers:
   {name}:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
 "#
@@ -1095,7 +1125,7 @@ providers:
   "{name}":
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
 "#
@@ -1124,7 +1154,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: dup
       - id: dup
@@ -1145,7 +1175,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         {key}
@@ -1172,7 +1202,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         context_window: 100
@@ -1196,7 +1226,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         thinking_levels: [low, high]
@@ -1219,7 +1249,7 @@ providers:
   p:
     api: anthropic
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         thinking_levels: [low, high]
@@ -1244,7 +1274,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         reasoning: false
@@ -1264,7 +1294,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         input: [image]
@@ -1280,7 +1310,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         input: [text, audio]
@@ -1299,7 +1329,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models:
       - id: m
         input: [text, image, image, text]
@@ -1326,7 +1356,7 @@ providers:
   openai:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     region: us
     models:
       - id: m
@@ -1445,7 +1475,10 @@ providers:
             Duration::from_secs(DEFAULT_TIMEOUT_SECS)
         );
 
-        let with_timeout = MINIMAL.replace("api_key: sk-test", "api_key: sk-test\n    timeout: 30");
+        let with_timeout = MINIMAL.replace(
+            "api_key: credential/test_key",
+            "api_key: credential/test_key\n    timeout: 30",
+        );
         let config = load(&with_timeout).unwrap().config;
         assert_eq!(
             config.providers.get("openai").unwrap().timeout,
@@ -1454,8 +1487,8 @@ providers:
 
         for bad in ["0", "-1", "1.5", "true", "\"30\""] {
             let yaml = MINIMAL.replace(
-                "api_key: sk-test",
-                &format!("api_key: sk-test\n    timeout: {bad}"),
+                "api_key: credential/test_key",
+                &format!("api_key: credential/test_key\n    timeout: {bad}"),
             );
             let errors = errors_of(&yaml);
             assert_eq!(paths(&errors), vec!["providers.openai.timeout"], "{bad}");
@@ -1481,8 +1514,8 @@ providers:
     #[test]
     fn api_version_is_optional() {
         let yaml = MINIMAL.replace(
-            "api_key: sk-test",
-            "api_key: sk-test\n    api_version: \"2024-10-21\"",
+            "api_key: credential/test_key",
+            "api_key: credential/test_key\n    api_version: \"2024-10-21\"",
         );
         let config = load(&yaml).unwrap().config;
         let route = config.route("openai", "gpt-4o").unwrap();
@@ -1490,41 +1523,59 @@ providers:
     }
 
     #[test]
-    fn literal_api_key_and_master_key_are_kept() {
+    fn api_key_is_kept_as_a_credential_reference() {
         let config = load(MINIMAL).unwrap().config;
         assert_eq!(config.auth.master_key, "literal-key");
-        assert_eq!(config.providers.get("openai").unwrap().api_key, "sk-test");
-    }
-
-    #[test]
-    fn missing_environment_variable_fails() {
-        std::env::remove_var("ANYBRIDGE_TEST_MISSING_VAR");
-        let yaml = MINIMAL.replace(
-            "api_key: sk-test",
-            "api_key: os.environ/ANYBRIDGE_TEST_MISSING_VAR",
+        assert_eq!(
+            config.providers.get("openai").unwrap().api_key.to_string(),
+            "credential/test_key"
         );
-        let errors = errors_of(&yaml);
-        assert_eq!(paths(&errors), vec!["providers.openai.api_key"]);
-        assert!(errors[0].message.contains("未设置"), "{errors:?}");
     }
 
     #[test]
-    fn environment_variable_is_expanded() {
-        std::env::set_var("ANYBRIDGE_TEST_EXPANDED_KEY", "expanded-value");
+    fn legacy_environment_reference_is_rejected_with_migration_hint() {
+        for legacy in ["os.environ/ANYBRIDGE_TEST_KEY", "ANYBRIDGE_TEST_KEY"] {
+            let yaml = MINIMAL.replace(
+                "api_key: credential/test_key",
+                &format!("api_key: {legacy}"),
+            );
+            let errors = errors_of(&yaml);
+            assert_eq!(paths(&errors), vec!["providers.openai.api_key"], "{legacy}");
+            assert!(
+                errors[0].message.contains("credential/"),
+                "应提示新写法：{errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_reference_must_be_a_valid_name() {
+        for bad in ["credential/", "credential/1abc", "credential/a-b"] {
+            let yaml = MINIMAL.replace("api_key: credential/test_key", &format!("api_key: {bad}"));
+            let errors = errors_of(&yaml);
+            assert_eq!(paths(&errors), vec!["providers.openai.api_key"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn credentials_section_is_optional() {
+        let config = load(MINIMAL).unwrap().config;
+        assert_eq!(config.credentials.file, None);
+
         let yaml = MINIMAL.replace(
-            "api_key: sk-test",
-            "api_key: os.environ/ANYBRIDGE_TEST_EXPANDED_KEY",
+            "auth:\n  master_key: literal-key",
+            "auth:\n  master_key: literal-key\ncredentials:\n  file: /tmp/creds.yaml",
         );
         let config = load(&yaml).unwrap().config;
         assert_eq!(
-            config.providers.get("openai").unwrap().api_key,
-            "expanded-value"
+            config.credentials.file.as_deref(),
+            Some(std::path::Path::new("/tmp/creds.yaml"))
         );
     }
 
     #[test]
     fn empty_secret_fails() {
-        let errors = errors_of(&MINIMAL.replace("api_key: sk-test", "api_key: \"\""));
+        let errors = errors_of(&MINIMAL.replace("api_key: credential/test_key", "api_key: \"\""));
         assert_eq!(paths(&errors), vec!["providers.openai.api_key"]);
     }
 
@@ -1551,7 +1602,7 @@ providers:
   p:
     api: completions
     base_url: https://example.com/v1
-    api_key: k
+    api_key: credential/k
     models: nope
 "#,
         );
@@ -1573,8 +1624,7 @@ providers:
 
     #[test]
     fn load_from_path_reads_file() {
-        let dir =
-            std::env::temp_dir().join(format!("anybridge-litellm-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("{GATEWAY_NAME}-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         std::fs::write(&path, MINIMAL).unwrap();

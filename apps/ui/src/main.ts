@@ -1,7 +1,5 @@
 import "./app.css";
 import {
-  PROVIDERS_ENDPOINT,
-  TOKEN_STORAGE_KEY,
   fetchState,
   modelPath,
   mutate,
@@ -9,65 +7,24 @@ import {
   type ModelDraft,
   type ModelEntry,
   type MutationResult,
-  type ProviderDraft,
   type ProviderEntry,
 } from "./api";
 import { confirmDialog, openForm, type FieldSpec, type FormValues } from "./form";
+import { openProviderDialog } from "./provider-dialog";
 import {
   clearError,
   el,
   mountShell,
+  renderAbout,
   renderErrorState,
   renderLoading,
-  renderMissingToken,
   renderState,
+  setActiveView,
   setRefreshing,
   showError,
   type RowActions,
+  type View,
 } from "./render";
-
-/**
- * 读取 token：优先 URL 查询参数，其次 sessionStorage。
- * URL 中的 token 会被写入 sessionStorage 并从地址栏移除，避免落进浏览历史。
- * 不使用 localStorage。
- */
-function readToken(): string | null {
-  const location = window.location;
-  let token: string | null = null;
-
-  try {
-    const params = new URLSearchParams(location.search);
-    const fromUrl = params.get("token");
-    if (fromUrl !== null && fromUrl.trim() !== "") {
-      token = fromUrl.trim();
-      try {
-        sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
-      } catch {
-        // 隐私模式等场景下 sessionStorage 可能不可用，忽略即可。
-      }
-      params.delete("token");
-      const search = params.toString();
-      const cleaned = `${location.pathname}${search === "" ? "" : `?${search}`}${location.hash}`;
-      window.history.replaceState(null, "", cleaned);
-    }
-  } catch {
-    // URLSearchParams 构造失败时退回 sessionStorage。
-  }
-
-  if (token === null) {
-    try {
-      token = sessionStorage.getItem(TOKEN_STORAGE_KEY);
-    } catch {
-      token = null;
-    }
-  }
-
-  if (token === null) {
-    return null;
-  }
-  const trimmed = token.trim();
-  return trimmed === "" ? null : trimmed;
-}
 
 function text(value: string | string[] | undefined): string {
   return typeof value === "string" ? value.trim() : "";
@@ -120,112 +77,29 @@ if (root === null) {
   throw new Error("缺少 #app 挂载点");
 }
 
-/** 「默认思考档位」输入框的候选来源，随模型对话框一起创建/销毁。 */
-const THINKING_LEVELS_ID = "model-thinking-levels";
-
-const token = readToken();
 let requestId = 0;
 
-const shell = mountShell(root, () => {
-  void load();
-});
+/** 当前视图：Provider 列表 / 关于。切换不刷新页面，只重渲染。 */
+let view: View = "providers";
 
-function openProviderForm(provider: ProviderEntry | null): void {
-  const current = provider;
-  const editing = current !== null;
-  const keyHint =
-    current?.api_key?.kind === "env" && typeof current.api_key.env === "string"
-      ? `当前：os.environ/${current.api_key.env}（留空保持原值）`
-      : "只接受 os.environ/VAR（或裸变量名）；明文密钥不会写进配置文件";
+const shell = mountShell(
+  root,
+  () => {
+    void load();
+  },
+  (next) => {
+    if (next === view) {
+      return;
+    }
+    view = next;
+    setActiveView(shell, view);
+    void load();
+  },
+);
+setActiveView(shell, view);
 
-  const fields: FieldSpec[] = [
-    {
-      name: "name",
-      label: "provider 名",
-      kind: "text",
-      value: current?.name ?? "",
-      required: !editing,
-      readOnly: editing,
-      hint: editing
-        ? "改名请删除后重建"
-        : "小写字母开头，只含小写字母 / 数字 / 连字符，最长 32 字符",
-    },
-    {
-      name: "api",
-      label: "api",
-      kind: "select",
-      value: current?.api ?? "completions",
-      required: true,
-      options: [
-        { value: "completions", label: "completions（OpenAI Chat）" },
-        { value: "anthropic", label: "anthropic（Messages）" },
-        { value: "responses", label: "responses（OpenAI Responses）" },
-      ],
-    },
-    {
-      name: "base_url",
-      label: "base_url",
-      kind: "text",
-      value: current?.base_url ?? "",
-      required: true,
-      placeholder: "https://api.openai.com/v1",
-      wide: true,
-    },
-    {
-      name: "api_key",
-      label: "api_key（环境变量）",
-      kind: "text",
-      placeholder: "os.environ/OPENAI_API_KEY",
-      // 服务端新建时要求必填；编辑时留空表示保持原值。
-      required: !editing,
-      hint: keyHint,
-      wide: true,
-    },
-    {
-      name: "timeout",
-      label: "timeout（秒）",
-      kind: "number",
-      value: current?.timeout ?? "",
-      min: 1,
-      placeholder: "600",
-    },
-    {
-      name: "api_version",
-      label: "api_version（可选）",
-      kind: "text",
-      value: current?.api_version ?? "",
-      placeholder: "2023-06-01",
-    },
-  ];
-
-  openForm(
-    {
-      title: editing ? `编辑 provider · ${current.name}` : "新增 provider",
-      fields,
-      submitLabel: editing ? "保存" : "创建",
-    },
-    async (values: FormValues) => {
-      const payload: ProviderDraft = {
-        name: text(values.name),
-        api: text(values.api),
-        base_url: text(values.base_url),
-        api_key: optionalText(values.api_key),
-        timeout: optionalNumber(values.timeout),
-        api_version: optionalText(values.api_version),
-      };
-      const result =
-        current !== null
-          ? await mutate(token ?? "", "PATCH", providerPath(current.name), payload)
-          : await mutate(token ?? "", "POST", PROVIDERS_ENDPOINT, payload);
-      const failure = failureMessage(result);
-      if (failure !== null) {
-        return failure;
-      }
-      await load();
-      return null;
-    },
-  );
-}
+/** 「默认思考档位」输入框的候选来源，随模型对话框一起创建/销毁。 */
+const THINKING_LEVELS_ID = "model-thinking-levels";
 
 function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void {
   const current = model;
@@ -318,11 +192,11 @@ function openModelForm(provider: ProviderEntry, model: ModelEntry | null): void 
       };
       const result =
         current !== null
-          ? await mutate(token ?? "", "PATCH", modelPath(provider.name), {
+          ? await mutate("PATCH", modelPath(provider.name), {
               original_id: current.id,
               model: payload,
             })
-          : await mutate(token ?? "", "POST", modelPath(provider.name), payload);
+          : await mutate("POST", modelPath(provider.name), payload);
       const failure = failureMessage(result);
       if (failure !== null) {
         return failure;
@@ -361,7 +235,7 @@ async function removeProvider(provider: ProviderEntry): Promise<void> {
   if (!confirmed) {
     return;
   }
-  const result = await mutate(token ?? "", "DELETE", providerPath(provider.name));
+  const result = await mutate("DELETE", providerPath(provider.name));
   const failure = failureMessage(result);
   if (failure !== null) {
     showError(shell, failure);
@@ -381,7 +255,7 @@ async function removeModel(provider: ProviderEntry, model: ModelEntry): Promise<
   if (!confirmed) {
     return;
   }
-  const result = await mutate(token ?? "", "DELETE", modelPath(provider.name, model.id));
+  const result = await mutate("DELETE", modelPath(provider.name, model.id));
   const failure = failureMessage(result);
   if (failure !== null) {
     showError(shell, failure);
@@ -393,8 +267,12 @@ async function removeModel(provider: ProviderEntry, model: ModelEntry): Promise<
 
 const actions: RowActions = {
   editable: true,
-  onCreateProvider: () => openProviderForm(null),
-  onEditProvider: (provider) => openProviderForm(provider),
+  onCreateProvider: () => {
+    openProviderDialog({ provider: null, onSaved: load });
+  },
+  onEditProvider: (provider) => {
+    openProviderDialog({ provider, onSaved: load });
+  },
   onDeleteProvider: (provider) => {
     void removeProvider(provider);
   },
@@ -408,18 +286,11 @@ const actions: RowActions = {
 async function load(): Promise<void> {
   const current = ++requestId;
 
-  if (token === null) {
-    clearError(shell);
-    renderMissingToken(shell);
-    setRefreshing(shell, false);
-    return;
-  }
-
   clearError(shell);
   setRefreshing(shell, true);
   renderLoading(shell);
 
-  const result = await fetchState(token);
+  const result = await fetchState();
   if (current !== requestId) {
     return;
   }
@@ -428,7 +299,11 @@ async function load(): Promise<void> {
 
   if (result.kind === "ok") {
     actions.editable = result.state.editable !== false;
-    renderState(shell, result.state, actions);
+    if (view === "about") {
+      renderAbout(shell, result.state);
+    } else {
+      renderState(shell, result.state, actions);
+    }
     return;
   }
 

@@ -7,6 +7,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_anybridge-litellm");
+/// 服务名（二进制名）只从 core 常量取，避免测试里手写。
+const NAME: &str = anybridge_litellm_core::GATEWAY_NAME;
 
 fn run(args: &[&str]) -> Output {
     Command::new(BIN)
@@ -20,10 +22,7 @@ fn unique_dir(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "anybridge-litellm-cli-{tag}-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("{NAME}-cli-{tag}-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -45,7 +44,7 @@ providers:
   openai:
     api: completions
     base_url: http://127.0.0.1:1/v1
-    api_key: sk-test-cli
+    api_key: credential/openai
     models:
       - id: gpt-4o
 "#
@@ -151,7 +150,7 @@ fn bad_config_exits_2_with_field_path() {
 
 #[test]
 fn missing_config_file_exits_2() {
-    let output = run(&["--config", "/nonexistent/anybridge-litellm.yaml"]);
+    let output = run(&["--config", &format!("/nonexistent/{NAME}.yaml")]);
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("config"), "stderr：{stderr}");
@@ -170,7 +169,7 @@ providers:
   openai:
     api: completions
     base_url: http://127.0.0.1:1/v1
-    api_key: sk-test-cli
+    api_key: credential/openai
     unknown_key: 1
     models:
       - id: gpt-4o
@@ -213,7 +212,7 @@ fn serving_health_then_terminates() {
     // 根发现路径也应可用，且不需要 key。
     let discovery = http_get(&bind, "/").expect("请求 / 失败");
     assert!(discovery.contains("200 OK"), "响应：{discovery}");
-    assert!(discovery.contains("anybridge-litellm"), "响应：{discovery}");
+    assert!(discovery.contains(NAME), "响应：{discovery}");
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -289,7 +288,7 @@ fn console_url_is_printed_and_serves_state() {
     )
     .expect("请求失败");
     assert!(state.contains("200 OK"), "{state}");
-    assert!(state.contains("anybridge-litellm"), "{state}");
+    assert!(state.contains(NAME), "{state}");
     assert!(state.contains("/llmproxy/openai/v1"), "{state}");
     // 上游 key 不能出现在控制台响应里。
     assert!(!state.contains("sk-test-cli"), "{state}");

@@ -125,6 +125,9 @@ impl Gateway {
         let dir = std::env::temp_dir().join(format!("ablt-load-{port}"));
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("config.yaml");
+        let credentials = dir.join("credentials.yaml");
+        std::fs::write(&credentials, "credentials:\n  upstream: sk-load-test\n").unwrap();
+        let credentials_display = credentials.display().to_string();
         std::fs::write(
             &config,
             format!(
@@ -133,11 +136,13 @@ server:
   bind: "127.0.0.1:{port}"
 auth:
   master_key: {MASTER_KEY}
+credentials:
+  file: "{credentials_display}"
 providers:
   fake:
     api: completions
     base_url: http://{upstream}/v1
-    api_key: sk-upstream
+    api_key: credential/upstream
     timeout: 60
     models:
       - id: stream

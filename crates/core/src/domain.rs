@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::credential::CredentialRef;
+
 /// 上游 API 协议类型。它是声明，不是翻译器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKind {
@@ -82,24 +84,30 @@ pub struct ModelEntry {
     pub default_thinking_level: Option<String>,
 }
 
-/// 单个 provider 的解析后配置。`api_key` 是展开后的明文。
+/// 单个 provider 的解析后配置。
+///
+/// `api_key` 是**凭据引用**，不是明文：值由凭据存储在每次请求时解析，
+/// 因此轮换密钥不需要重启。
 #[derive(Clone)]
 pub struct ProviderConfig {
     pub api: ApiKind,
+    /// 可选展示名；为空时界面回退显示 provider id。
+    pub name: Option<String>,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: CredentialRef,
     pub api_version: Option<String>,
     pub timeout: Duration,
     pub models: Vec<ModelEntry>,
 }
 
-/// 手写 `Debug`：`api_key` 永远不出现明文。
+/// 手写 `Debug`：只显示引用名，永远不出现密钥值。
 impl std::fmt::Debug for ProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderConfig")
             .field("api", &self.api)
+            .field("name", &self.name)
             .field("base_url", &self.base_url)
-            .field("api_key", &"***")
+            .field("api_key", &self.api_key.to_string())
             .field("api_version", &self.api_version)
             .field("timeout", &self.timeout)
             .field("models", &self.models)
@@ -114,7 +122,7 @@ pub struct ModelRoute<'a> {
     pub api: ApiKind,
     pub model: &'a ModelEntry,
     pub base_url: &'a str,
-    pub api_key: &'a str,
+    pub api_key: &'a CredentialRef,
     pub api_version: Option<&'a str>,
     pub timeout: Duration,
 }
@@ -151,14 +159,15 @@ mod tests {
     fn provider_config_debug_masks_api_key() {
         let cfg = ProviderConfig {
             api: ApiKind::Completions,
+            name: Some("WPS AI".into()),
             base_url: "http://127.0.0.1:1/v1".into(),
-            api_key: "sk-secret".into(),
+            api_key: CredentialRef::parse_at("credential/wpsai", "api_key").unwrap(),
             api_version: None,
             timeout: Duration::from_secs(1),
             models: Vec::new(),
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("sk-secret"));
-        assert!(rendered.contains("***"));
+        assert!(rendered.contains("credential/wpsai"));
     }
 }

@@ -15,22 +15,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anybridge_litellm_core::{ApiKeyKind, ConfigError, ConfigErrors, Document, GatewayConfig};
+use anybridge_litellm_core::{ConfigError, ConfigErrors, CredentialRef, Document, GatewayConfig};
 
 /// 一份对外可见的配置快照。
 #[derive(Debug)]
 pub struct Snapshot {
     pub config: Arc<GatewayConfig>,
-    /// provider → `api_key` 形态。只含环境变量名，永远不含值。
-    pub keys: BTreeMap<String, ApiKeyKind>,
+    /// provider → 凭据引用。只含引用名，永远不含值。
+    pub refs: BTreeMap<String, CredentialRef>,
 }
 
 impl Snapshot {
-    pub fn key_kind(&self, provider: &str) -> ApiKeyKind {
-        self.keys
-            .get(provider)
-            .cloned()
-            .unwrap_or(ApiKeyKind::Missing)
+    pub fn credential_ref(&self, provider: &str) -> Option<&CredentialRef> {
+        self.refs.get(provider)
     }
 }
 
@@ -61,11 +58,11 @@ impl ConfigStore {
         path: Option<PathBuf>,
         bind_override: Option<String>,
     ) -> Self {
-        let keys = path
+        let refs = path
             .as_deref()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|text| Document::parse(&text).ok())
-            .map(|document| document.api_key_kinds())
+            .map(|document| document.api_key_refs())
             .unwrap_or_default();
 
         if let Some(bind) = &bind_override {
@@ -77,7 +74,7 @@ impl ConfigStore {
             bind_override,
             snapshot: RwLock::new(Arc::new(Snapshot {
                 config: Arc::new(config),
-                keys,
+                refs,
             })),
             write_gate: tokio::sync::Mutex::new(()),
         }
@@ -93,6 +90,11 @@ impl ConfigStore {
 
     pub fn is_writable(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// 配置文件路径；`None` 表示只读模式。
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// 串行的读-改-写。闭包拿到的是**磁盘当前**文档，返回值不需要自己校验。
@@ -129,7 +131,7 @@ impl ConfigStore {
 
         let snapshot = Arc::new(Snapshot {
             config: Arc::new(config),
-            keys: document.api_key_kinds(),
+            refs: document.api_key_refs(),
         });
         *self
             .snapshot
@@ -198,7 +200,7 @@ providers:
   openai:
     api: completions
     base_url: https://api.openai.com/v1
-    api_key: os.environ/ANYBRIDGE_STORE_TEST_KEY
+    api_key: credential/openai
     models:
       - id: gpt-4o
 "#;
@@ -217,7 +219,6 @@ providers:
     }
 
     fn store(dir: &Path) -> ConfigStore {
-        std::env::set_var("ANYBRIDGE_STORE_TEST_KEY", "sk-test");
         let path = dir.join("config.yaml");
         std::fs::write(&path, YAML).unwrap();
         let config = load_from_str(YAML, &Default::default()).unwrap().config;
@@ -234,9 +235,10 @@ providers:
                 document.upsert_provider(
                     &anybridge_litellm_core::ProviderDraft {
                         name: "local".into(),
+                        display_name: Some("Local".into()),
                         api: "completions".into(),
                         base_url: "http://127.0.0.1:11434/v1".into(),
-                        api_key_env: Some("ANYBRIDGE_STORE_TEST_KEY".into()),
+                        api_key_env: Some("credential/local".into()),
                         timeout: Some(15),
                         api_version: None,
                     },
@@ -251,11 +253,13 @@ providers:
 
         let written = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
         assert!(written.contains("local:"));
-        assert!(written.contains("api_key: os.environ/ANYBRIDGE_STORE_TEST_KEY"));
-        assert!(!written.contains("sk-test"), "不得写回展开后的密钥");
+        assert!(
+            written.contains("api_key: credential/LOCAL_API_KEY"),
+            "凭据引用由 provider id 派生：{written}"
+        );
         assert_eq!(
-            snapshot.key_kind("local"),
-            ApiKeyKind::Env("ANYBRIDGE_STORE_TEST_KEY".into())
+            snapshot.credential_ref("local").map(ToString::to_string),
+            Some("credential/LOCAL_API_KEY".to_string())
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -306,9 +310,10 @@ providers:
                 document.upsert_provider(
                     &anybridge_litellm_core::ProviderDraft {
                         name: "bad".into(),
+                        display_name: None,
                         api: "chat".into(),
                         base_url: "https://example.com/v1".into(),
-                        api_key_env: Some("ANYBRIDGE_STORE_TEST_KEY".into()),
+                        api_key_env: Some("credential/local".into()),
                         timeout: None,
                         api_version: None,
                     },
@@ -345,7 +350,6 @@ providers:
     #[tokio::test]
     async fn bind_override_survives_mutation() {
         let dir = temp_dir("bind");
-        std::env::set_var("ANYBRIDGE_STORE_TEST_KEY", "sk-test");
         let path = dir.join("config.yaml");
         std::fs::write(&path, YAML).unwrap();
         let config = load_from_str(YAML, &Default::default()).unwrap().config;

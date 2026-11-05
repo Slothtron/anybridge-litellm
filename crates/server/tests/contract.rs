@@ -5,7 +5,12 @@
 
 use std::collections::HashMap;
 
-use anybridge_litellm_core::load_from_str;
+use std::sync::Arc;
+
+use anybridge_litellm_core::{load_from_str, GATEWAY_NAME};
+use anybridge_litellm_core::{
+    CredentialError, CredentialInfo, CredentialRef, CredentialStore, ResolvedCredential,
+};
 use anybridge_litellm_server::{build_router, AppState};
 use axum::body::Body;
 use axum::extract::Request;
@@ -122,7 +127,7 @@ providers:
   openai:
     api: completions
     base_url: {base_url}
-    api_key: {OPENAI_KEY}
+    api_key: credential/openai
     models:
       - id: gpt-4o
         name: GPT-4o
@@ -139,11 +144,49 @@ providers:
   anthropic:
     api: anthropic
     base_url: {base_url}
-    api_key: {ANTHROPIC_KEY}
+    api_key: credential/anthropic
 {api_version}    models:
       - id: claude-sonnet
 "#
     )
+}
+
+/// 测试用凭据存储：固定返回两个值，写入一律只读。
+struct StaticCredentials;
+
+impl CredentialStore for StaticCredentials {
+    fn resolve(&self, reference: &CredentialRef) -> Option<ResolvedCredential> {
+        let value = match reference.name() {
+            "openai" => OPENAI_KEY,
+            "anthropic" => ANTHROPIC_KEY,
+            _ => return None,
+        };
+        Some(ResolvedCredential {
+            value: value.to_string(),
+            source: "test".to_string(),
+        })
+    }
+
+    fn describe(&self, reference: &CredentialRef) -> CredentialInfo {
+        let configured = matches!(reference.name(), "openai" | "anthropic");
+        CredentialInfo {
+            configured,
+            source: configured.then(|| "test".to_string()),
+            writable: false,
+        }
+    }
+
+    fn list(&self) -> Vec<(String, CredentialInfo)> {
+        Vec::new()
+    }
+
+    fn set(&self, _reference: &CredentialRef, _value: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::ReadOnly)
+    }
+
+    fn unset(&self, _reference: &CredentialRef) -> Result<(), CredentialError> {
+        Err(CredentialError::ReadOnly)
+    }
 }
 
 async fn app_with(base_url: &str, anthropic_api_version: Option<&str>) -> Router {
@@ -153,7 +196,10 @@ async fn app_with(base_url: &str, anthropic_api_version: Option<&str>) -> Router
     )
     .expect("测试配置应可解析")
     .config;
-    build_router(AppState::with_token(config, CONSOLE_TOKEN.to_string()))
+    build_router(
+        AppState::with_token(config, CONSOLE_TOKEN.to_string())
+            .with_credentials(Arc::new(StaticCredentials)),
+    )
 }
 
 /// 控制台用例需要显式 `Host`（回环）与可选的 `Origin`。
@@ -241,7 +287,7 @@ async fn health_and_discovery_shapes() {
     let response = send(&app, "GET", "/", None, None).await;
     assert_eq!(response.status(), StatusCode::OK);
     let discovery = body_json(response).await;
-    assert_eq!(discovery["name"], "anybridge-litellm");
+    assert_eq!(discovery["name"], GATEWAY_NAME);
     assert_eq!(discovery["version"], env!("CARGO_PKG_VERSION"));
     let providers = discovery["providers"].as_array().unwrap();
     assert_eq!(providers.len(), 2);
@@ -839,7 +885,7 @@ async fn console_api_requires_token() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let state = body_json(response).await;
-    assert_eq!(state["name"], "anybridge-litellm");
+    assert_eq!(state["name"], GATEWAY_NAME);
     assert_eq!(state["prefix"], "/llmproxy");
     assert!(state["version"].is_string());
     assert_eq!(state["providers"].as_array().unwrap().len(), 2); // openai / anthropic

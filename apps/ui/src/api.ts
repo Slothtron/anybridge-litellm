@@ -9,13 +9,12 @@
  * 契约见仓库设计方案 §3.5。
  */
 
-/** sessionStorage 中保存 console token 的键。 */
-export const TOKEN_STORAGE_KEY = "anybridge.console.token";
-
 /** 状态接口路径；相对于站点根，挂在 `/console/` 下。 */
 const STATE_ENDPOINT = "/console/api/state";
 /** provider 集合路径；新建 provider 时直接 POST。 */
 export const PROVIDERS_ENDPOINT = "/console/api/providers";
+/** 凭据集合路径；`PUT /{name}` 写入，`DELETE /{name}` 删除。 */
+export const CREDENTIALS_ENDPOINT = "/console/api/credentials";
 
 export interface ReasoningInfo {
   supported?: boolean;
@@ -35,15 +34,38 @@ export interface ModelEntry {
   reasoning?: ReasoningInfo;
 }
 
-/** `api_key` 的形态描述符。值本身永远不会离开服务端。 */
+/**
+ * `api_key` 的凭据描述符。值本身永远不会离开服务端。
+ *
+ * 配置里只存 `credential/<name>` 引用，密钥值由后端的凭据存储解析；
+ * 这里只给「是否已配置 / 来自哪一层 / 能不能写」。
+ */
 export interface ApiKeyInfo {
-  kind: "env" | "literal" | "missing";
-  /** `kind === "env"` 时的环境变量名。 */
-  env?: string;
+  kind: "credential";
+  /** 凭据名（不带前缀）。 */
+  name?: string;
+  /** 完整引用，形如 `credential/WPSAI_API_KEY`。 */
+  reference?: string;
+  configured?: boolean;
+  /** 提供值的来源层；本地实现固定是 `file`。 */
+  source?: string | null;
+  writable?: boolean;
+}
+
+/** 凭据写入结果。 */
+export interface CredentialState {
+  name: string;
+  reference: string;
+  configured: boolean;
+  source?: string | null;
+  writable: boolean;
 }
 
 export interface ProviderEntry {
+  /** provider id（配置键、路径段）。 */
   name: string;
+  /** 可选展示名；为空时界面回退显示 id。 */
+  display_name?: string | null;
   api?: string;
   base_path?: string;
   base_url?: string;
@@ -61,12 +83,20 @@ export interface ConsoleState {
   prefix?: string;
   /** 服务是否以 `--config` 启动；false 时写接口返回 409。 */
   editable?: boolean;
+  /** 配置文件路径；只读模式下为 null。 */
+  config_file?: string | null;
+  /** 凭据文件路径；只读模式下为 null。 */
+  credentials_file?: string | null;
   providers?: ProviderEntry[];
 }
 
 /** 写接口载荷。`undefined` 字段会被 JSON 序列化丢弃。 */
 export interface ProviderDraft {
+  /** provider id（配置键、路径段）。 */
   name: string;
+  /** 可选展示名；为空时界面回退显示 id。 */
+  display_name?: string;
+  /** 凭据引用；服务端按 `upper(id)_API_KEY` 派生，这里传了也只会被校验语法。 */
   api: string;
   base_url: string;
   /** 只接受 `os.environ/VAR`；空表示更新时保留原值。 */
@@ -162,18 +192,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
  * - 401 → `{ kind: "unauthorized" }`
  * - 其它状态码 / 网络错误 / 非对象响应 → `{ kind: "error", message }`
  */
-export async function fetchState(token: string): Promise<FetchStateResult> {
+export async function fetchState(): Promise<FetchStateResult> {
   let response: Response;
   try {
     response = await fetch(STATE_ENDPOINT, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "X-Console-Token": token,
-      },
+      headers: { Accept: "application/json" },
       // 控制台读的是磁盘上的最新配置，禁止任何缓存层返回旧状态。
       cache: "no-store",
-      credentials: "omit",
+      // 会话 cookie 由浏览器自动带上（HttpOnly，JS 读不到）。
+      credentials: "same-origin",
     });
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause);
@@ -203,15 +231,11 @@ export async function fetchState(token: string): Promise<FetchStateResult> {
  * `body` 为 `undefined` 时不发请求体（DELETE）。
  */
 export async function mutate(
-  token: string,
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<MutationResult> {
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    "X-Console-Token": token,
-  };
+  const headers: Record<string, string> = { Accept: "application/json" };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
@@ -223,7 +247,7 @@ export async function mutate(
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
-      credentials: "omit",
+      credentials: "same-origin",
     });
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause);
@@ -246,6 +270,143 @@ export async function mutate(
     return { kind: "error", message: "响应格式不正确：期望 JSON 对象", details: [] };
   }
   return { kind: "ok", state: payload as ConsoleState };
+}
+
+/** 上游 `/models` 的一个条目（已归一化成 id + 展示名）。 */
+export interface UpstreamModel {
+  id: string;
+  name?: string | null;
+}
+
+export type UpstreamModelsResult =
+  | { kind: "ok"; models: UpstreamModel[] }
+  | { kind: "error"; message: string };
+
+/** 带上该 provider 的凭据向上游要一份模型列表；不落盘。 */
+export async function fetchUpstreamModels(
+  provider: string,
+): Promise<UpstreamModelsResult> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${PROVIDERS_ENDPOINT}/${encodeURIComponent(provider)}/upstream-models`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+    );
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    return { kind: "error", message: `无法连接网关：${detail}` };
+  }
+  return parseUpstreamModels(response);
+}
+
+async function postUpstreamModels(
+  path: string,
+  payload: unknown,
+): Promise<UpstreamModelsResult> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    return { kind: "error", message: `无法连接网关：${detail}` };
+  }
+  return parseUpstreamModels(response);
+}
+
+async function parseUpstreamModels(
+  response: Response,
+): Promise<UpstreamModelsResult> {
+  const body = await readJson(response);
+  if (response.status !== 200) {
+    return {
+      kind: "error",
+      message: extractErrorMessage(body, response.status),
+    };
+  }
+  if (!isObject(body) || !Array.isArray(body.models)) {
+    return { kind: "error", message: "响应格式不正确：期望 { models: [] }" };
+  }
+  const models: UpstreamModel[] = [];
+  for (const item of body.models) {
+    if (!isObject(item)) {
+      continue;
+    }
+    const id = item.id;
+    if (typeof id !== "string" || id.trim() === "") {
+      continue;
+    }
+    models.push({
+      id,
+      name: typeof item.name === "string" ? item.name : null,
+    });
+  }
+  return { kind: "ok", models };
+}
+
+/** 还没建 provider 时，用表单里的地址与密钥直接探一次上游模型列表。 */
+export async function probeUpstreamModels(probe: {
+    base_url: string;
+    api: string;
+    api_version?: string;
+    api_key: string;
+  },
+): Promise<UpstreamModelsResult> {
+  return postUpstreamModels("/console/api/upstream-models", probe);
+}
+
+/** 用整份 id 列表同步模型目录（只增删差异，保留已有条目的字段）。 */
+export async function syncModels(
+  provider: string,
+  ids: readonly string[],
+): Promise<MutationResult> {
+  return mutate(
+    "PUT",
+    `${PROVIDERS_ENDPOINT}/${encodeURIComponent(provider)}/models`,
+    { ids },
+  );
+}
+
+/** 批量导入上游模型（已存在的 id 由服务端跳过）。 */
+export async function importModels(
+  provider: string,
+  ids: readonly string[],
+): Promise<MutationResult> {
+  return mutate(
+    "POST",
+    `${PROVIDERS_ENDPOINT}/${encodeURIComponent(provider)}/models/import`,
+    { ids },
+  );
+}
+
+/** 写入/轮换一条凭据。值是单向下行：响应里永远不会回显。 */
+export async function setCredential(
+  name: string,
+  value: string,
+): Promise<MutationResult> {
+  return mutate("PUT", `${CREDENTIALS_ENDPOINT}/${encodeURIComponent(name)}`, {
+    value,
+  });
+}
+
+/** 删除一条凭据。 */
+export async function deleteCredential(
+  name: string,
+): Promise<MutationResult> {
+  return mutate("DELETE", `${CREDENTIALS_ENDPOINT}/${encodeURIComponent(name)}`);
 }
 
 export function providerPath(name: string): string {

@@ -137,7 +137,7 @@ function collect(form: HTMLFormElement, fields: readonly FieldSpec[]): FormValue
 }
 
 /** 生成「点击遮罩关闭」的 daisyUI 背景层。 */
-function backdrop(): HTMLFormElement {
+export function modalBackdrop(): HTMLFormElement {
   const form = el("form", "modal-backdrop");
   form.method = "dialog";
   const close = el("button");
@@ -207,7 +207,7 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
 
   form.append(header, grid, error, actions);
   box.append(form);
-  dialog.append(box, backdrop());
+  dialog.append(box, modalBackdrop());
   document.body.append(dialog);
   dialog.showModal();
 
@@ -324,7 +324,7 @@ export function confirmDialog(spec: ConfirmSpec): Promise<boolean> {
     actions.append(cancel, confirm);
 
     box.append(body, actions);
-    dialog.append(box, backdrop());
+    dialog.append(box, modalBackdrop());
     document.body.append(dialog);
 
     let confirmed = false;

@@ -1,21 +1,24 @@
-//! anybridge-litellm 二进制入口：手写参数解析、日志、信号、启动 server。
+//! 二进制入口：手写参数解析、日志、信号、启动 server。
 
 use std::path::PathBuf;
 
 use anybridge_litellm_core::{load_from_path, Document, GatewayConfig, LoadOptions};
 use tracing_subscriber::EnvFilter;
 
-const BIN_NAME: &str = "anybridge-litellm";
+/// 二进制名取自 Cargo（`[[bin]] name`），不在代码里手写。
+const BIN_NAME: &str = env!("CARGO_BIN_NAME");
 const DEFAULT_CONFIG: &str = "config.yaml";
 
-const HELP: &str = "\
-anybridge-litellm —— 上游 provider 的纯代理网关
+fn help() -> String {
+    format!(
+        "\
+{BIN_NAME} —— 上游 provider 的纯代理网关
 
 用法:
-  anybridge-litellm [选项]
+  {BIN_NAME} [选项]
 
 选项:
-  --config <path>    配置文件路径（缺省 config.yaml）
+  --config <path>    配置文件路径（缺省 {DEFAULT_CONFIG}）
   --strict-config    未知配置键视为错误
   --bind <addr>      覆盖配置里的 server.bind
   -V, --version      打印版本
@@ -27,7 +30,9 @@ anybridge-litellm —— 上游 provider 的纯代理网关
 环境变量:
   RUST_LOG           日志过滤（缺省 info）
   GATEWAY_MASTER_KEY 等 os.environ/VAR 引用的变量在配置加载时展开
-";
+"
+    )
+}
 
 struct Options {
     config: PathBuf,
@@ -93,7 +98,7 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         Ok(Parsed::Help) => {
-            print!("{HELP}");
+            print!("{}", help());
             return std::process::ExitCode::SUCCESS;
         }
         Ok(Parsed::Run(options)) => options,
@@ -154,17 +159,39 @@ providers: {}
         .clone()
         .unwrap_or_else(|| config.server.bind.clone());
 
+    // 凭据文件：`credentials.file` 优先，否则落到 XDG 配置目录。
+    // 只读模式下不提供凭据文件，凭据存储也就不可写（与「只读控制台」的承诺一致）。
+    let credentials_path = if read_only {
+        None
+    } else {
+        Some(
+            config
+                .credentials
+                .file
+                .clone()
+                .unwrap_or_else(default_credentials_path),
+        )
+    };
+
     // 控制台 token 只在这里出现一次：打印带 token 的 URL，掉出日志即需重启换新。
     let console_token = anybridge_litellm_server::new_token();
     println!("listening on http://{bind}");
     println!("console: http://{bind}/console/?token={console_token}");
+
+    // 会话密钥跟凭据文件同目录：重启后浏览器登录态仍然有效。
+    let session_key = credentials_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(|dir| dir.join("console-session.key"));
 
     let state = anybridge_litellm_server::AppState::with_token_and_path(
         config,
         console_token,
         store_path,
         options.bind,
-    );
+        credentials_path,
+    )
+    .with_session_key(session_key);
 
     match anybridge_litellm_server::serve(state, &bind, shutdown_signal()).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -173,6 +200,21 @@ providers: {}
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// 默认凭据文件：`$XDG_CONFIG_HOME/anybridge-litellm/credentials.yaml`，
+/// 没设 `XDG_CONFIG_HOME` 时退回 `~/.config/anybridge-litellm/credentials.yaml`。
+fn default_credentials_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(BIN_NAME).join("credentials.yaml")
 }
 
 /// `ctrl_c` 与 `SIGTERM` 都触发优雅关闭。
@@ -209,6 +251,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anybridge_litellm_core::GATEWAY_NAME;
 
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         parse_args(args.iter().map(|arg| arg.to_string()))
@@ -224,6 +267,12 @@ mod tests {
         assert!(!options.config_explicit);
         assert!(!options.strict);
         assert!(options.bind.is_none());
+    }
+
+    #[test]
+    fn binary_name_matches_gateway_name() {
+        // 二进制名来自 Cargo，服务名来自 core 常量；改名时这条会挂。
+        assert_eq!(BIN_NAME, GATEWAY_NAME);
     }
 
     #[test]

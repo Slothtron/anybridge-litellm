@@ -11,25 +11,28 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_anybridge-litellm");
 const MASTER_KEY: &str = "test-master-key";
-const KEY_VAR: &str = "ANYBRIDGE_CRUD_KEY";
 const KEY_VALUE: &str = "sk-crud-value";
+#[allow(dead_code)]
+const _UNUSED_KEY_VALUE: &str = KEY_VALUE;
 
 const CONFIG_TEMPLATE: &str = r#"
 server:
   bind: "{bind}"
 auth:
   master_key: test-master-key
+credentials:
+  file: "{credentials}"
 providers:
   openai:
     api: completions
     base_url: http://127.0.0.1:1/v1
-    api_key: os.environ/ANYBRIDGE_CRUD_KEY
+    api_key: credential/openai
     models:
       - id: gpt-4o
   anthropic:
     api: anthropic
     base_url: http://127.0.0.1:1/v1
-    api_key: os.environ/ANYBRIDGE_CRUD_KEY
+    api_key: credential/openai
     models:
       - id: claude-sonnet
 "#;
@@ -40,7 +43,8 @@ fn unique_dir(tag: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "anybridge-litellm-crud-{tag}-{}-{nanos}",
+        "{}-crud-{tag}-{}-{nanos}",
+        anybridge_litellm_core::GATEWAY_NAME,
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
@@ -156,11 +160,17 @@ impl Server {
         let addr = format!("127.0.0.1:{port}");
 
         let path = dir.join("config.yaml");
-        std::fs::write(&path, CONFIG_TEMPLATE.replace("{bind}", &addr)).unwrap();
+        let credentials = dir.join("credentials.yaml");
+        std::fs::write(
+            &path,
+            CONFIG_TEMPLATE
+                .replace("{bind}", &addr)
+                .replace("{credentials}", credentials.to_str().unwrap()),
+        )
+        .unwrap();
 
         let mut child = Command::new(BIN)
             .args(["--config", path.to_str().unwrap()])
-            .env(KEY_VAR, KEY_VALUE)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -198,9 +208,8 @@ impl Drop for Server {
 }
 
 fn provider_payload() -> String {
-    format!(
-        r#"{{"name":"local","api":"completions","base_url":"http://127.0.0.1:11434/v1","api_key":"os.environ/{KEY_VAR}","timeout":30}}"#
-    )
+    r#"{"name":"local","api":"completions","base_url":"http://127.0.0.1:11434/v1","api_key":"credential/openai","timeout":30}"#
+        .to_string()
 }
 
 #[test]
@@ -226,10 +235,7 @@ fn console_crud_persists_and_hot_reloads() {
     let written = std::fs::read_to_string(&config).unwrap();
     assert!(written.contains("local:"), "{written}");
     assert!(written.contains("qwen3:8b"), "{written}");
-    assert!(
-        written.contains(&format!("api_key: os.environ/{KEY_VAR}")),
-        "{written}"
-    );
+    assert!(written.contains("api_key: credential/openai"), "{written}");
     assert!(!written.contains(KEY_VALUE), "不得写回明文密钥：{written}");
     #[cfg(unix)]
     {

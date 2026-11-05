@@ -1,20 +1,28 @@
 //! systemd unit 的黑盒校验：结构断言 + 真实 `systemctl --user` 加载。
 //!
 //! 加载用例会把 unit 软链进用户 unit 目录再 `daemon-reload`，因此用独立的
-//! 名字（`anybridge-litellm-selftest.service`）并在 `Drop` 里无条件清理。
+//! 名字（`<服务名>-selftest.service`）并在 `Drop` 里无条件清理。
 //! 没有用户级 systemd（容器/CI）时跳过，不算失败。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const UNIT_NAME: &str = "anybridge-litellm.service";
-const SELFTEST_NAME: &str = "anybridge-litellm-selftest.service";
+/// 服务名唯一来源是 `core::GATEWAY_NAME`，unit 文件名跟着它走。
+const NAME: &str = anybridge_litellm_core::GATEWAY_NAME;
+
+fn unit_name() -> String {
+    format!("{NAME}.service")
+}
+
+fn selftest_name() -> String {
+    format!("{NAME}-selftest.service")
+}
 
 fn unit_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../deploy")
-        .join(UNIT_NAME)
+        .join(unit_name())
 }
 
 fn systemctl_user(args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -72,7 +80,7 @@ fn unit_file_has_required_directives() {
         "IPAddressDeny=any",
         "NoNewPrivileges=true",
         // 控制台写配置需要这个例外，否则 ProtectHome=read-only 会让写回失败。
-        "ReadWritePaths=%h/.config/anybridge-litellm",
+        &format!("ReadWritePaths=%h/.config/{NAME}"),
         "WantedBy=default.target",
     ] {
         assert!(
@@ -91,7 +99,7 @@ fn systemctl_user_can_load_unit() {
 
     let dir = std::env::temp_dir().join(format!("ablt-unit-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("创建临时目录失败");
-    let copy = dir.join(SELFTEST_NAME);
+    let copy = dir.join(selftest_name());
     fs::copy(unit_path(), &copy).expect("复制 unit 失败");
 
     // 先建 guard 再 link：即使后续断言失败也能清掉软链。
@@ -104,7 +112,7 @@ fn systemctl_user_can_load_unit() {
         .map(PathBuf::from)
         .expect("解析用户 unit 目录失败");
     let _guard = LinkGuard {
-        link: user_unit_dir.join(SELFTEST_NAME),
+        link: user_unit_dir.join(selftest_name()),
     };
 
     let link =
@@ -118,7 +126,7 @@ fn systemctl_user_can_load_unit() {
     let reload = systemctl_user(&["daemon-reload"]).expect("执行 daemon-reload");
     assert!(reload.status.success(), "daemon-reload 失败");
 
-    let show = systemctl_user(&["show", "-p", "LoadState", SELFTEST_NAME]).expect("执行 show");
+    let show = systemctl_user(&["show", "-p", "LoadState", &selftest_name()]).expect("执行 show");
     let stdout = String::from_utf8_lossy(&show.stdout);
     assert_eq!(
         stdout.trim(),
