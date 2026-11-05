@@ -1,0 +1,129 @@
+/*
+ * anybridge-litellm 控制台样式入口。
+ *
+ * 全部组件来自 daisyUI 5，布局与排版来自 Tailwind CSS v4 工具类：
+ * 控制台里不再维护一套手写设计令牌，新增界面直接复用 `btn` / `card` /
+ * `table` / `modal` / `badge` / `alert` 等组件，保证交互与视觉一致。
+ *
+ * 主题：`anybridge`（浅色，默认）与 `anybridge-dark`（跟随
+ * `prefers-color-scheme`）。令牌沿用旧的蓝灰配色，深浅两套一一对应。
+ */
+
+@import "tailwindcss" source(none);
+
+/* 只扫描控制台源码，避免把 dist / node_modules 里的产物再当成候选类名。 */
+@source "../index.html";
+@source "./";
+
+/* 关闭 daisyUI 自带主题，只暴露下面两个自定义主题。 */
+@plugin "daisyui" {
+  themes: false;
+  logs: false;
+}
+
+@plugin "daisyui/theme" {
+  name: "anybridge";
+  default: true;
+  color-scheme: light;
+
+  --color-base-100: oklch(100% 0 0);
+  --color-base-200: oklch(97.8% 0.003 265);
+  --color-base-300: oklch(92.5% 0.006 265);
+  --color-base-content: oklch(25.5% 0.008 250);
+
+  --color-primary: oklch(54.6% 0.215 262.9);
+  --color-primary-content: oklch(100% 0 0);
+  --color-secondary: oklch(54.1% 0.247 293);
+  --color-secondary-content: oklch(100% 0 0);
+  --color-accent: oklch(59.9% 0.104 184.7);
+  --color-accent-content: oklch(100% 0 0);
+  --color-neutral: oklch(27.8% 0.023 257);
+  --color-neutral-content: oklch(98.5% 0.002 247);
+
+  --color-info: oklch(57.7% 0.13 239.5);
+  --color-info-content: oklch(100% 0 0);
+  --color-success: oklch(51% 0.12 158);
+  --color-success-content: oklch(100% 0 0);
+  --color-warning: oklch(55% 0.14 56);
+  --color-warning-content: oklch(100% 0 0);
+  --color-error: oklch(50% 0.17 27);
+  --color-error-content: oklch(100% 0 0);
+
+  --radius-selector: 9999px;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "anybridge-dark";
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: oklch(22.5% 0.009 248);
+  --color-base-200: oklch(19% 0.008 248);
+  --color-base-300: oklch(32% 0.011 248);
+  --color-base-content: oklch(93% 0.004 247);
+
+  --color-primary: oklch(72.5% 0.135 260);
+  --color-primary-content: oklch(20% 0.04 262);
+  --color-secondary: oklch(81% 0.1 293);
+  --color-secondary-content: oklch(24% 0.07 285);
+  --color-accent: oklch(87% 0.1 180);
+  --color-accent-content: oklch(25% 0.05 180);
+  --color-neutral: oklch(37% 0.02 257);
+  --color-neutral-content: oklch(96% 0.003 247);
+
+  --color-info: oklch(80% 0.1 232);
+  --color-info-content: oklch(22% 0.05 240);
+  --color-success: oklch(80% 0.12 160);
+  --color-success-content: oklch(22% 0.05 160);
+  --color-warning: oklch(82% 0.1 70);
+  --color-warning-content: oklch(24% 0.06 60);
+  --color-error: oklch(78% 0.13 25);
+  --color-error-content: oklch(24% 0.07 25);
+
+  --radius-selector: 9999px;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@layer base {
+  html {
+    @apply bg-base-200;
+  }
+
+  body {
+    @apply min-h-dvh bg-base-200 text-base-content antialiased;
+    font-family:
+      system-ui, -apple-system, "Segoe UI", "Noto Sans SC", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  ::selection {
+    @apply bg-primary/25;
+  }
+}
+
+/* 焦点环统一走主色，而不是 daisyUI 默认的近黑 content 色。
+ * daisyUI 组件落在 utilities 层，这里不加 `@layer`，保证覆盖顺序。 */
+.input:focus,
+.input:focus-within,
+.select:focus,
+.select:focus-within {
+  --input-color: var(--color-primary);
+}
+
+/* 复选框保持方形：`--radius-selector` 同时服务徽章（需要胶囊），不能整体改小。 */
+.checkbox {
+  border-radius: 0.25rem;
+}

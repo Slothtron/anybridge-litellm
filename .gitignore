@@ -1,0 +1,11 @@
+.agents/
+target/
+dist/
+__pycache__/
+crates/*/target/
+apps/ui/dist/
+apps/ui/node_modules/
+npm/node_modules/
+*.tsbuildinfo
+config.yaml
+*.local.yaml

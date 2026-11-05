@@ -1,0 +1,43 @@
+server:
+  bind: "127.0.0.1:4000"
+
+auth:
+  master_key: os.environ/GATEWAY_MASTER_KEY
+
+providers:
+  openai:                              # 配置键 = 路径里的 provider 段
+    api: completions                   # completions | anthropic | responses
+    base_url: https://api.openai.com/v1
+    api_key: os.environ/OPENAI_API_KEY
+    timeout: 600
+    models:
+      - id: gpt-4o
+        name: GPT-4o
+        context_window: 128000
+        max_output_tokens: 16384
+        input: [text, image]
+        reasoning: true
+        thinking_levels: [none, low, medium, high]
+        default_thinking_level: high
+  openai-responses:                    # 一个 provider 只有一种 api；要换协议就另开 provider
+    api: responses
+    base_url: https://api.openai.com/v1
+    api_key: os.environ/OPENAI_API_KEY
+    timeout: 600
+    models:
+      - id: gpt-5.6-luna
+  anthropic:
+    api: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_key: os.environ/ANTHROPIC_API_KEY
+    timeout: 600
+    models:
+      - id: claude-sonnet-4-20250514
+      - id: claude-haiku-4-20250514
+  local:
+    api: completions
+    base_url: http://127.0.0.1:11434/v1
+    api_key: not-needed
+    timeout: 300
+    models:
+      - id: qwen3:8b

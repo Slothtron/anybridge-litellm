@@ -1,0 +1,14 @@
+[package]
+name = "anybridge-litellm-core"
+description = "anybridge-litellm 纯逻辑核心：配置、领域类型、路径白名单、鉴权"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+subtle.workspace = true

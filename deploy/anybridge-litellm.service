@@ -1,0 +1,39 @@
+[Unit]
+Description=anybridge-litellm — 上游 provider 的纯代理网关
+Documentation=file://%h/.local/share/anybridge-litellm/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ExecStart 必须是绝对路径（systemd 不做 PATH 查找）；--bind 显式钉住回环。
+ExecStart=%h/.local/bin/anybridge-litellm --config %h/.config/anybridge-litellm/config.yaml --bind 127.0.0.1:4000
+Environment=RUST_LOG=info
+EnvironmentFile=-%h/.config/anybridge-litellm/env
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# 只允许回环与本地套接字，杜绝误绑到 0.0.0.0 后对外暴露。
+IPAddressAllow=localhost
+IPAddressDeny=any
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# 只写配置文件：控制台的增删改要回写 %h/.config/anybridge-litellm/config.yaml，
+# 其余路径（含 $HOME 其它位置）仍是只读。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/anybridge-litellm
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+[Install]
+WantedBy=default.target

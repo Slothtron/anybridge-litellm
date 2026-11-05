@@ -1,0 +1,27 @@
+[package]
+name = "anybridge-litellm-server"
+description = "anybridge-litellm HTTP 层：路由、鉴权、字节流透传"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anybridge-litellm-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+tokio = { workspace = true, features = ["full"] }

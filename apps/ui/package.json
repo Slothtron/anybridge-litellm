@@ -1,0 +1,20 @@
+{
+  "name": "@anybridge/console-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "anybridge-litellm Web 控制台（Tailwind CSS + daisyUI）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.4",
+    "daisyui": "^5.7.50",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}
