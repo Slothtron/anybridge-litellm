@@ -116,21 +116,19 @@ export function modelFieldSpecs(
     },
     {
       name: "reasoning",
-      label: "reasoning",
-      kind: "select",
-      value: supported === true ? "true" : supported === false ? "false" : "",
-      options: [
-        { value: "true", label: "支持" },
-        { value: "false", label: "不支持" },
-      ],
+      label: "推理等级",
+      kind: "toggle",
+      value: supported === true ? "true" : "false",
+      wide: true,
+      hint: "打开后由网关注入思考参数；关闭表示该模型不支持推理",
     },
     {
       name: "thinking_levels",
-      label: "thinking_levels（逗号分隔）",
-      kind: "text",
-      value: (levels ?? []).join(", "),
-      placeholder: "none, low, medium, high",
+      label: "思考档位",
+      kind: "levels",
+      value: levels ?? [],
       wide: true,
+      dependsOn: "reasoning",
     },
     {
       name: "default_thinking_level",
@@ -138,7 +136,8 @@ export function modelFieldSpecs(
       kind: "text",
       value: defaultLevel ?? "",
       datalist: datalistId,
-      hint: "必须是 thinking_levels 里的一个值",
+      dependsOn: "reasoning",
+      hint: "必须是思考档位里的一个值",
     },
   );
   return fields;
@@ -146,16 +145,18 @@ export function modelFieldSpecs(
 
 /** 表单值 → 提交草稿（不含 id；id 由调用方按场景补）。 */
 export function draftFromValues(values: FormValues): Omit<ModelDraft, "id"> {
-  const reasoning = text(values.reasoning);
+  // 开关关闭 = 明确「不支持推理」，档位与默认档位一并清空。
+  const reasoning = text(values.reasoning) === "true";
   const input = values.input;
+  const levels = reasoning && Array.isArray(values.thinking_levels) ? values.thinking_levels : [];
   return {
     name: optionalText(values.name),
     context_window: optionalNumber(values.context_window),
     max_output_tokens: optionalNumber(values.max_output_tokens),
     input: Array.isArray(input) && input.length > 0 ? input : undefined,
-    reasoning: reasoning === "" ? undefined : reasoning === "true",
-    thinking_levels: splitList(values.thinking_levels),
-    default_thinking_level: optionalText(values.default_thinking_level),
+    reasoning,
+    thinking_levels: levels.length > 0 ? levels : undefined,
+    default_thinking_level: reasoning ? optionalText(values.default_thinking_level) : undefined,
   };
 }
 
@@ -189,7 +190,7 @@ export function hasModelConfig(draft: ModelDraft): boolean {
 }
 
 /**
- * 在 `root` 里挂「默认思考档位」的 datalist，并随 thinking_levels 输入实时派生候选。
+ * 在 `root` 里挂「默认思考档位」的 datalist，并随档位行输入实时派生候选。
  * 与 `modelFieldSpecs` 的 `datalistId` 必须一致。
  */
 export function attachThinkingLevelsDatalist(
@@ -199,17 +200,21 @@ export function attachThinkingLevelsDatalist(
   const list = el("datalist");
   list.id = datalistId;
   root.append(list);
-  const levelsInput = root.querySelector<HTMLInputElement>(
-    'input[name="thinking_levels"]',
-  );
-  const syncLevels = (): void => {
+  const sync = (): void => {
     list.textContent = "";
-    for (const level of splitList(levelsInput?.value) ?? []) {
+    for (const input of root.querySelectorAll<HTMLInputElement>(
+      'input[name="thinking_levels"]',
+    )) {
+      const value = input.value.trim();
+      if (value === "") {
+        continue;
+      }
       const option = el("option");
-      option.value = level;
+      option.value = value;
       list.append(option);
     }
   };
-  levelsInput?.addEventListener("input", syncLevels);
-  syncLevels();
+  // 档位行是动态增删的，用事件委托覆盖新增行。
+  root.addEventListener("input", sync);
+  sync();
 }

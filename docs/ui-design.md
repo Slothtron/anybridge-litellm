@@ -129,3 +129,4 @@ cd apps/ui && npm run dev -- --host 127.0.0.1
 | 2026-11-05 | v1：四条硬约束、主色/强调色切 `#1E40AF` + `#D97706`、warning 推黄色、门禁（构建 / 全量 / 视觉走查） |
 | 2026-11-05 | v1.1 落地：15 处任意字号（`text-[11px]` ×14、`text-[11.5px]` ×1）统一为 `text-xs`；4 处裸 `text-base` 归入四档（h1 → `text-2xl`，弹窗 h2 → `text-lg`）；2 处行内删除按钮 `btn-error btn-soft` → `btn-ghost text-error` |
 | 2026-11-05 | v1.2 落地：移除新增对话框的预设/tab（单列表单）；「获取可用模型」改弹窗勾选导入，上游标准字段（context_window / max_output_tokens / input_modalities / reasoning，含别名）自动预填；目录行 icon 按钮 + 手风琴就地配置模型；行内删除与复制改图标按钮；首页卡片瘦身为入口（展示完整接入地址 `http://{bind}{base_path}`），新增 `#/provider/{id}` hash 路由详情页承接元信息与模型表 |
+| 2026-11-05 | v1.3 落地：详情卡精简为单列（接入地址 / base_url / timeout），移除 base_path、api_key、api_version 与来源；模型表与编辑弹窗目录支持勾选 + 批量删除；思考档位列去掉 `reasoning_effort` 参数名（只留档位徽章）；模型表单「推理等级」改为开关，开启后才展示档位行编辑（增删行）与默认档位 |

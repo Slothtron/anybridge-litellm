@@ -8,9 +8,16 @@
  * 确认框也走同一套 `modal`，避免原生 `confirm()` 的样式与主题脱节。
  */
 
+import { icon } from "./icons";
 import { el } from "./render";
 
-export type FieldKind = "text" | "number" | "select" | "checkboxes";
+export type FieldKind =
+  | "text"
+  | "number"
+  | "select"
+  | "checkboxes"
+  | "toggle"
+  | "levels";
 
 export interface SelectOption {
   value: string;
@@ -31,6 +38,8 @@ export interface FieldSpec {
   datalist?: string;
   min?: number;
   wide?: boolean;
+  /** 依赖的开关字段名：开关关闭时整组隐藏，提交时也不收集。 */
+  dependsOn?: string;
 }
 
 export interface FormSpec {
@@ -56,8 +65,54 @@ const HINT_CLASS = "m-0 text-xs leading-relaxed text-subtle";
 
 let dialogSeq = 0;
 
+/** 档位列表的一行：一个档位值与删除按钮。 */
+function levelRow(name: string, value: string): HTMLElement {
+  const row = el("div", "flex items-center gap-1.5");
+  const input = el("input", "input input-sm w-full");
+  input.type = "text";
+  input.name = name;
+  input.value = value;
+  input.placeholder = "档位值，如 high";
+  input.setAttribute("aria-label", "思考档位");
+  const remove = el("button", "btn btn-xs btn-ghost shrink-0 text-error");
+  remove.type = "button";
+  remove.append(icon("trash"));
+  remove.title = "移除档位";
+  remove.setAttribute("aria-label", "移除档位");
+  remove.addEventListener("click", () => row.remove());
+  row.append(input, remove);
+  return row;
+}
+
 function fieldControl(field: FieldSpec): HTMLElement {
   const controlId = `field-${field.name}`;
+
+  if (field.kind === "toggle") {
+    const input = el("input", "toggle toggle-sm");
+    input.type = "checkbox";
+    input.id = controlId;
+    input.name = field.name;
+    input.checked = field.value === "true";
+    return input;
+  }
+
+  if (field.kind === "levels") {
+    const box = el("div", "flex flex-col gap-1.5");
+    const rows = el("div", "flex flex-col gap-1.5");
+    rows.dataset.role = "level-rows";
+    for (const value of Array.isArray(field.value) ? field.value : []) {
+      rows.append(levelRow(field.name, value));
+    }
+    const add = el("button", "btn btn-xs btn-ghost self-start", "+ 添加档位");
+    add.type = "button";
+    add.addEventListener("click", () => {
+      const row = levelRow(field.name, "");
+      rows.append(row);
+      row.querySelector("input")?.focus();
+    });
+    box.append(rows, add);
+    return box;
+  }
 
   if (field.kind === "select") {
     const select = el("select", "select w-full");
@@ -135,6 +190,19 @@ export function collectValues(
       ).map((input) => input.value);
       continue;
     }
+    if (field.kind === "levels") {
+      values[field.name] = Array.from(
+        root.querySelectorAll<HTMLInputElement>(`input[name="${field.name}"]`),
+      )
+        .map((input) => input.value.trim())
+        .filter((value) => value !== "");
+      continue;
+    }
+    if (field.kind === "toggle") {
+      const input = root.querySelector<HTMLInputElement>(`input[name="${field.name}"]`);
+      values[field.name] = input?.checked === true ? "true" : "false";
+      continue;
+    }
     const control = root.querySelector<HTMLInputElement | HTMLSelectElement>(
       `[name="${field.name}"]`,
     );
@@ -156,8 +224,9 @@ export function renderFieldGroup(field: FieldSpec): HTMLElement {
       ? "flex min-w-0 flex-col gap-1.5 sm:col-span-2"
       : "flex min-w-0 flex-col gap-1.5",
   );
+  wrapper.dataset.field = field.name;
   const label = el("label", LABEL_CLASS, field.label);
-  if (field.kind !== "checkboxes") {
+  if (field.kind !== "checkboxes" && field.kind !== "levels") {
     label.htmlFor = `field-${field.name}`;
   }
   wrapper.append(label, fieldControl(field));
@@ -165,6 +234,44 @@ export function renderFieldGroup(field: FieldSpec): HTMLElement {
     wrapper.append(el("p", HINT_CLASS, field.hint));
   }
   return wrapper;
+}
+
+/**
+ * 渲染一整组字段，并接上 `dependsOn` 的显隐联动。
+ * 对话框与抽屉式手风琴共用，保证两边行为一致。
+ */
+export function renderFieldGroups(
+  container: HTMLElement,
+  fields: readonly FieldSpec[],
+): void {
+  for (const field of fields) {
+    container.append(renderFieldGroup(field));
+  }
+  const apply = (): void => {
+    for (const field of fields) {
+      if (field.dependsOn === undefined) {
+        continue;
+      }
+      const toggle = container.querySelector<HTMLInputElement>(
+        `input[name="${field.dependsOn}"]`,
+      );
+      const wrapper = container.querySelector<HTMLElement>(
+        `[data-field="${field.name}"]`,
+      );
+      if (wrapper !== null) {
+        wrapper.hidden = toggle?.checked !== true;
+      }
+    }
+  };
+  for (const field of fields) {
+    if (!fields.some((other) => other.dependsOn === field.name)) {
+      continue;
+    }
+    container
+      .querySelector<HTMLInputElement>(`input[name="${field.name}"]`)
+      ?.addEventListener("change", apply);
+  }
+  apply();
 }
 
 function collect(form: HTMLFormElement, fields: readonly FieldSpec[]): FormValues {
@@ -208,23 +315,7 @@ export function openForm(spec: FormSpec, submit: FormSubmit): FormHandle {
     "div",
     "grid grid-cols-1 gap-x-4 gap-y-3.5 overflow-y-auto px-6 py-5 sm:grid-cols-2",
   );
-  for (const field of spec.fields) {
-    const wrapper = el(
-      "div",
-      field.wide === true
-        ? "flex min-w-0 flex-col gap-1.5 sm:col-span-2"
-        : "flex min-w-0 flex-col gap-1.5",
-    );
-    const label = el("label", LABEL_CLASS, field.label);
-    if (field.kind !== "checkboxes") {
-      label.htmlFor = `field-${field.name}`;
-    }
-    wrapper.append(label, fieldControl(field));
-    if (field.hint !== undefined && field.hint !== "") {
-      wrapper.append(el("p", HINT_CLASS, field.hint));
-    }
-    grid.append(wrapper);
-  }
+  renderFieldGroups(grid, spec.fields);
 
   const error = el(
     "p",

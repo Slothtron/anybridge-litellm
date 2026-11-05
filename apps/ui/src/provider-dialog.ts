@@ -30,7 +30,7 @@ import {
   type ProviderEntry,
   type UpstreamModel,
 } from "./api";
-import { collectValues, modalBackdrop, renderFieldGroup } from "./form";
+import { collectValues, modalBackdrop, renderFieldGroups } from "./form";
 import {
   THINKING_LEVELS_ID,
   attachThinkingLevelsDatalist,
@@ -176,6 +176,17 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
     "模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。",
   );
 
+  // 批量管理：勾选行 → 全选/清空/批量移除。
+  const catalogTools = el("div", "flex flex-wrap items-center gap-1.5");
+  const batchCount = el("span", "text-xs text-muted", "已选 0 项");
+  const selectAll = el("button", "btn btn-xs btn-ghost", "全选");
+  selectAll.type = "button";
+  const clearSelection = el("button", "btn btn-xs btn-ghost", "清空");
+  clearSelection.type = "button";
+  const batchRemove = el("button", "btn btn-xs btn-ghost text-error", "批量移除");
+  batchRemove.type = "button";
+  catalogTools.append(batchCount, selectAll, clearSelection, batchRemove);
+
   const addRow = el("div", "flex gap-1.5");
   const addInput = el("input", "input input-sm w-full");
   addInput.type = "text";
@@ -185,7 +196,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
   addButton.type = "button";
   addRow.append(addInput, addButton);
 
-  catalog.append(catalogHead, catalogList, catalogEmpty, addRow);
+  catalog.append(catalogHead, catalogTools, catalogList, catalogEmpty, addRow);
 
   body.append(description, panel, catalog);
 
@@ -301,9 +312,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       "div",
       "mt-2 grid grid-cols-1 gap-x-4 gap-y-3 border-t border-base-300 pt-3 sm:grid-cols-2",
     );
-    for (const spec of fields) {
-      panelNode.append(renderFieldGroup(spec));
-    }
+    renderFieldGroups(panelNode, fields);
     attachThinkingLevelsDatalist(panelNode, datalistId);
     // 输入即合回草稿：即使不收起直接保存，值也不会丢。
     const liveSync = (): void => {
@@ -335,13 +344,34 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
     }
   }
 
+  /** 目录勾选：批量移除用。 */
+  const selected = new Set<string>();
+
   function renderModels(): void {
     openIndex = null;
     openPanel = null;
     catalogList.textContent = "";
+    for (const id of [...selected]) {
+      if (!drafts.some((draft) => draft.id === id)) {
+        selected.delete(id);
+      }
+    }
     drafts.forEach((draft, index) => {
       const container = el("div", "flex flex-col rounded-md bg-base-100 px-2 py-1.5");
       const line = el("div", "flex items-center gap-2");
+      const checkbox = el("input", "checkbox checkbox-xs shrink-0");
+      checkbox.type = "checkbox";
+      checkbox.checked = selected.has(draft.id);
+      checkbox.setAttribute("aria-label", `选择模型 ${draft.id}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          selected.add(draft.id);
+        } else {
+          selected.delete(draft.id);
+        }
+        syncBatch();
+      });
+      line.append(checkbox);
       line.append(el("code", "min-w-0 flex-1 truncate font-mono text-xs", draft.id));
       const badges = summaryBadges(draft);
       badges.setAttribute("data-role", "summary");
@@ -351,6 +381,7 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       );
       line.append(
         iconButton("trash", `移除模型 ${draft.id}`, () => {
+          selected.delete(draft.id);
           drafts.splice(index, 1);
           renderModels();
         }, "text-error"),
@@ -359,7 +390,31 @@ export function openProviderDialog(options: ProviderDialogOptions): void {
       catalogList.append(container);
     });
     catalogEmpty.hidden = drafts.length > 0;
+    syncBatch();
   }
+
+  function syncBatch(): void {
+    batchCount.textContent = `已选 ${selected.size} 项`;
+    batchRemove.disabled = selected.size === 0;
+    selectAll.disabled = drafts.length === 0 || selected.size === drafts.length;
+    clearSelection.disabled = selected.size === 0;
+  }
+
+  selectAll.addEventListener("click", () => {
+    for (const draft of drafts) {
+      selected.add(draft.id);
+    }
+    renderModels();
+  });
+  clearSelection.addEventListener("click", () => {
+    selected.clear();
+    renderModels();
+  });
+  batchRemove.addEventListener("click", () => {
+    drafts = drafts.filter((draft) => !selected.has(draft.id));
+    selected.clear();
+    renderModels();
+  });
 
   function addDraft(draft: ModelDraft): void {
     if (draft.id.trim() === "" || drafts.some((item) => item.id === draft.id)) {

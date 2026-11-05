@@ -164,6 +164,35 @@ async function removeModel(provider: ProviderEntry, model: ModelEntry): Promise<
   await load();
 }
 
+/** 批量删除：先确认一次，再逐条删除；任一条失败停在原地并回显。 */
+async function removeModels(
+  provider: ProviderEntry,
+  models: ModelEntry[],
+): Promise<void> {
+  const confirmed = await confirmDialog({
+    title: `删除 ${models.length} 个模型`,
+    message: `确定删除 provider \`${provider.name}\` 下的 ${models.length} 个模型？\n${models
+      .map((model) => `· ${model.id}`)
+      .join("\n")}`,
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+  for (const model of models) {
+    const result = await mutate("DELETE", modelPath(provider.name, model.id));
+    const failure = failureMessage(result);
+    if (failure !== null) {
+      showError(shell, failure);
+      await load();
+      return;
+    }
+  }
+  clearError(shell);
+  await load();
+}
+
 const actions: RowActions = {
   editable: true,
   onCreateProvider: () => {
@@ -179,6 +208,9 @@ const actions: RowActions = {
   onEditModel: (provider, model) => openModelForm(provider, model),
   onDeleteModel: (provider, model) => {
     void removeModel(provider, model);
+  },
+  onBatchDeleteModels: (provider, models) => {
+    void removeModels(provider, models);
   },
 };
 

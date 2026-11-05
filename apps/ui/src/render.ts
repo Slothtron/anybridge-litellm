@@ -52,6 +52,7 @@ export interface RowActions {
   onCreateModel(provider: ProviderEntry): void;
   onEditModel(provider: ProviderEntry, model: ModelEntry): void;
   onDeleteModel(provider: ProviderEntry, model: ModelEntry): void;
+  onBatchDeleteModels(provider: ProviderEntry, models: ModelEntry[]): void;
 }
 
 const numberFormat = new Intl.NumberFormat("en-US");
@@ -238,12 +239,6 @@ function reasoningCell(model: ModelEntry): HTMLElement {
     row.append(badge);
   }
   cell.append(row);
-
-  if (typeof reasoning.param === "string" && reasoning.param.trim() !== "") {
-    cell.append(
-      el("span", "font-mono text-xs text-muted", reasoning.param),
-    );
-  }
   return cell;
 }
 
@@ -274,43 +269,6 @@ function metaRow(
     if (copyable) {
       dd.append(copyButton(value, label));
     }
-  }
-  row.append(dd);
-  return row;
-}
-
-function apiKeyRow(provider: ProviderEntry): HTMLElement {
-  const row = el(
-    "div",
-    "grid grid-cols-1 gap-0.5 sm:grid-cols-[5.5rem_minmax(0,1fr)] sm:items-center sm:gap-2",
-  );
-  row.append(el("dt", "font-mono text-xs text-muted", "api_key"));
-  const dd = el("dd", "m-0 flex min-w-0 items-center gap-1.5");
-  const key = provider.api_key;
-  const reference = typeof key?.reference === "string" ? key.reference : "";
-  if (reference === "") {
-    dd.append(el("span", "text-subtle", "-"));
-    row.append(dd);
-    return row;
-  }
-
-  // 只展示引用，值永远不回到前端。
-  const code = el(
-    "code",
-    "truncate rounded-md bg-base-200 px-1.5 py-0.5 font-mono text-xs",
-    reference,
-  );
-  code.title = reference;
-  dd.append(code, copyButton(reference, "api_key"));
-  dd.append(
-    key?.configured === true
-      ? el("span", "badge badge-xs badge-success", "已配置")
-      : el("span", "badge badge-xs badge-warning", "未配置"),
-  );
-  if (typeof key?.source === "string" && key.source.trim() !== "") {
-    dd.append(
-      el("span", "whitespace-nowrap text-xs text-subtle", `源：${key.source}`),
-    );
   }
   row.append(dd);
   return row;
@@ -551,19 +509,14 @@ export function renderProviderDetail(
   }
   section.append(head);
 
-  // ---- 元信息卡 ----
+  // ---- 元信息卡：每行一个字段，只留真正用于接入的信息 ----
   const card = el(
     "div",
     "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm sm:p-5",
   );
-  const meta = el(
-    "dl",
-    "m-0 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 xl:grid-cols-3",
-  );
+  const meta = el("dl", "m-0 flex flex-col gap-2");
   meta.append(metaRow("接入地址", gatewayEndpoint(state, provider)));
   meta.append(metaRow("base_url", provider.base_url));
-  meta.append(metaRow("base_path", provider.base_path));
-  meta.append(apiKeyRow(provider));
   meta.append(
     metaRow(
       "timeout",
@@ -571,7 +524,6 @@ export function renderProviderDetail(
       false,
     ),
   );
-  meta.append(metaRow("api_version", provider.api_version, false));
   card.append(meta);
   section.append(card);
 
@@ -613,14 +565,52 @@ function renderModelTable(
   models: ModelEntry[],
   actions: RowActions,
 ): HTMLElement {
+  // 勾选按模型 id 记；重新渲染后由 `renderModelTable` 重建，选择不跨刷新保留。
+  const selected = new Set<string>();
+  const wrapper = el("div", "flex flex-col gap-2");
+
+  const toolbar = el("div", "flex flex-wrap items-center gap-2");
+  const count = el("span", "text-xs text-muted", "已选 0 项");
+  const selectAll = el("button", "btn btn-xs btn-ghost", "全选");
+  selectAll.type = "button";
+  const batchDelete = el("button", "btn btn-xs btn-ghost text-error", "批量删除");
+  batchDelete.type = "button";
+  batchDelete.disabled = true;
+  toolbar.append(count, selectAll, batchDelete);
+
+  const checkboxes: HTMLInputElement[] = [];
+  const syncBatch = (): void => {
+    count.textContent = `已选 ${selected.size} 项`;
+    batchDelete.disabled = selected.size === 0;
+    selectAll.disabled = models.length === 0 || selected.size === models.length;
+  };
+
   // 横向滚动容器：窄视口下宁可出滚动条，也不把 id 挤成竖排单字。
   const scroll = el("div", "overflow-x-auto");
-  const table = el("table", "table table-sm min-w-[760px]");
+  const table = el("table", "table table-sm min-w-[800px]");
   const thead = el("thead");
   const headRow = el(
     "tr",
     "border-b border-base-300 text-xs uppercase tracking-wide text-muted",
   );
+  if (actions.editable) {
+    const selectCell = el("th", "w-8");
+    const selectAllBox = el("input", "checkbox checkbox-xs");
+    selectAllBox.type = "checkbox";
+    selectAllBox.setAttribute("aria-label", "全选模型");
+    selectAllBox.addEventListener("change", () => {
+      selected.clear();
+      for (const [index, box] of checkboxes.entries()) {
+        box.checked = selectAllBox.checked;
+        if (selectAllBox.checked) {
+          selected.add(models[index].id);
+        }
+      }
+      syncBatch();
+    });
+    selectCell.append(selectAllBox);
+    headRow.append(selectCell);
+  }
   const columns = ["id", "展示名", "上下文窗口", "输出上限", "输入模态", "思考档位"];
   if (actions.editable) {
     columns.push("操作");
@@ -643,6 +633,23 @@ function renderModelTable(
   const tbody = el("tbody");
   for (const model of models) {
     const row = el("tr", "group hover:bg-base-200/60");
+    if (actions.editable) {
+      const selectCell = el("td", "w-8");
+      const box = el("input", "checkbox checkbox-xs");
+      box.type = "checkbox";
+      box.setAttribute("aria-label", `选择模型 ${model.id}`);
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          selected.add(model.id);
+        } else {
+          selected.delete(model.id);
+        }
+        syncBatch();
+      });
+      checkboxes.push(box);
+      selectCell.append(box);
+      row.append(selectCell);
+    }
     const idCell = el("td", "whitespace-nowrap");
     idCell.append(el("code", "font-mono text-xs", textOrDash(model.id)));
     row.append(idCell);
@@ -687,7 +694,25 @@ function renderModelTable(
   }
   table.append(tbody);
   scroll.append(table);
-  return scroll;
+
+  selectAll.addEventListener("click", () => {
+    for (const [index, box] of checkboxes.entries()) {
+      box.checked = true;
+      selected.add(models[index].id);
+    }
+    syncBatch();
+  });
+  batchDelete.addEventListener("click", () => {
+    const targets = models.filter((model) => selected.has(model.id));
+    if (targets.length === 0) {
+      return;
+    }
+    actions.onBatchDeleteModels(provider, targets);
+  });
+  syncBatch();
+
+  wrapper.append(toolbar, scroll);
+  return wrapper;
 }
 
 /** 建立页面骨架；只调用一次。 */
